@@ -1,0 +1,22 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+django = "*"
+djangorestframework = "*"
+drf-spectacular = "*"
+argon2-cffi = "*"
+django-cors-headers = "*"
+pillow = "*"
+django-filter = "*"
+django-simple-history = "*"
+djangorestframework-simplejwt = "*"
+pyinstaller = "*"
+waitress = "*"
+
+[dev-packages]
+
+[requires]
+python_version = "3.14"
