@@ -3,7 +3,7 @@ from decimal import Decimal
 from .models import (
     User, Category, Unit, PaymentMethod, Product, Inventory, StockTransfer, Client, Car, 
     ProductReceipt, ProductReceiptItem, Sale, SaleItem, Shift, CashFlow, Debt, PrinterSetting,
-    CurrencySetting
+    CurrencySetting, SaleService, WorkerTransaction
 )
 
 class CurrencySettingSerializer(serializers.ModelSerializer):
@@ -16,7 +16,7 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['id', 'username', 'first_name', 'last_name', 'phone_number', 'role', 'job', 'password']
+        fields = ['id', 'username', 'first_name', 'last_name', 'phone_number', 'role', 'job', 'monthly_tool_fee', 'password']
         extra_kwargs = {
             'username': {'required': False},
             'phone_number': {'required': True},
@@ -94,6 +94,7 @@ class ProductSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
     unit_name = serializers.CharField(source='unit.short_name', read_only=True)
     total_quantity = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True)
+    recent_sales_qty = serializers.DecimalField(max_digits=15, decimal_places=3, read_only=True, required=False)
     usd_rate = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
@@ -107,9 +108,20 @@ class ProductSerializer(serializers.ModelSerializer):
             return 12500.0
 
 class ClientSerializer(serializers.ModelSerializer):
+    worker_name = serializers.SerializerMethodField(read_only=True)
+    is_worker = serializers.SerializerMethodField(read_only=True)
+
     class Meta:
         model = Client
         fields = '__all__'
+
+    def get_worker_name(self, obj):
+        if obj.worker:
+            return obj.worker.get_full_name() or obj.worker.username
+        return None
+
+    def get_is_worker(self, obj):
+        return obj.worker_id is not None
 
 class CarSerializer(serializers.ModelSerializer):
     owner_name = serializers.CharField(source='owner.name', read_only=True, default='')
@@ -206,16 +218,37 @@ class ProductReceiptSerializer(serializers.ModelSerializer):
         return receipt
 
 class SaleItemSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    product_barcode = serializers.CharField(source='product.barcode', read_only=True)
+    unit_name = serializers.CharField(source='product.unit.name', read_only=True)
+
     class Meta:
         model = SaleItem
         fields = '__all__'
         read_only_fields = ['sale', 'total_cost']
 
+class SaleServiceSerializer(serializers.ModelSerializer):
+    worker_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SaleService
+        fields = ['id', 'sale', 'worker', 'worker_name', 'service_name', 'amount', 'amount_usd', 'created_at']
+        read_only_fields = ['sale']
+
+    def get_worker_name(self, obj):
+        if obj.worker:
+            return obj.worker.get_full_name() or obj.worker.username or obj.worker.phone_number
+        return "Tayinlanmagan"
+
 class SaleSerializer(serializers.ModelSerializer):
     items = SaleItemSerializer(many=True, read_only=True)
+    services = SaleServiceSerializer(many=True, read_only=True)
     car_plate = serializers.CharField(source='car.plate_number', read_only=True)
     car_type = serializers.CharField(source='car.car_type', read_only=True)
     client_name = serializers.CharField(source='client.name', read_only=True)
+    client_phone = serializers.CharField(source='client.phone_number', read_only=True)
+    client_account = serializers.CharField(source='client.account_number', read_only=True)
+    client_is_company = serializers.BooleanField(source='client.is_company', read_only=True)
     user_name = serializers.CharField(source='user.first_name', read_only=True)
     payment_type_name = serializers.CharField(source='payment_type.name', read_only=True)
 
@@ -226,10 +259,19 @@ class SaleSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         from django.utils import timezone
         from datetime import timedelta
-        from .models import Debt, PaymentMethod
+        from .models import Debt, PaymentMethod, SaleService
 
         items_data = self.initial_data.get('items', [])
+        services_data = self.initial_data.get('services', [])
         payments_data = self.initial_data.get('payments', [])
+
+        if not items_data and not services_data:
+            raise serializers.ValidationError({"detail": "Kamida bitta mahsulot yoki xizmat ko'rsatilishi kerak."})
+
+        # Calculate items and services totals
+        items_total = sum(float(i.get('price', 0)) * float(i.get('quantity', 1)) for i in items_data)
+        services_total = sum(float(s.get('amount', 0)) for s in services_data)
+        calc_total = items_total + services_total
         
         if payments_data:
             paid_amount = sum(float(p.get('amount', 0)) for p in payments_data)
@@ -238,7 +280,11 @@ class SaleSerializer(serializers.ModelSerializer):
                 method = PaymentMethod.objects.filter(id=payments_data[0].get('method')).first()
                 validated_data['payment_type'] = method
                 
-        total_amount = float(validated_data.get('total_amount', 0))
+        total_amount = float(validated_data.get('total_amount', calc_total))
+        if calc_total > 0 and (total_amount == 0 or 'total_amount' not in validated_data):
+            total_amount = calc_total
+        validated_data['total_amount'] = total_amount
+
         paid_amount = float(validated_data.get('paid_amount', 0))
         debt_amount = float(validated_data.get('debt_amount', max(0.0, total_amount - paid_amount)))
         validated_data['debt_amount'] = debt_amount
@@ -291,6 +337,18 @@ class SaleSerializer(serializers.ModelSerializer):
                 price=price,
                 total=total,
                 total_cost=total_cost_for_this_item
+            )
+
+        for svc_data in services_data:
+            worker_id = svc_data.get('worker')
+            if isinstance(worker_id, dict):
+                worker_id = worker_id.get('id')
+            SaleService.objects.create(
+                sale=sale,
+                worker_id=worker_id if worker_id else None,
+                service_name=svc_data.get('service_name') or "Xizmat haqi",
+                amount=Decimal(str(svc_data.get('amount', 0))),
+                amount_usd=Decimal(str(svc_data.get('amount_usd', 0)))
             )
             
         # Associate user's active shift if not set
@@ -429,8 +487,80 @@ class SaleSerializer(serializers.ModelSerializer):
                 )
             
             # Update instance amounts
-            instance.total_amount = new_total
-            instance.debt_amount = max(0, float(new_total) - float(instance.paid_amount))
+            services_total = sum(float(s.amount) for s in instance.services.all())
+            instance.total_amount = new_total + services_total
+            instance.debt_amount = max(0, float(instance.total_amount) - float(instance.paid_amount))
+
+        services_data = self.initial_data.get('services', None)
+        if services_data is not None:
+            instance.services.all().delete()
+            for svc_data in services_data:
+                worker_id = svc_data.get('worker')
+                if isinstance(worker_id, dict):
+                    worker_id = worker_id.get('id')
+                SaleService.objects.create(
+                    sale=instance,
+                    worker_id=worker_id if worker_id else None,
+                    service_name=svc_data.get('service_name') or "Xizmat haqi",
+                    amount=Decimal(str(svc_data.get('amount', 0))),
+                    amount_usd=Decimal(str(svc_data.get('amount_usd', 0)))
+                )
+            items_total = sum(float(i.total) for i in instance.items.all())
+            services_total = sum(float(s.get('amount', 0)) for s in services_data)
+            instance.total_amount = items_total + services_total
+            instance.debt_amount = max(0, float(instance.total_amount) - float(instance.paid_amount))
+
+        # Handle payments update
+        from .models import CashFlow, PaymentMethod
+        payments_data = self.initial_data.get('payments', None)
+        if payments_data is not None:
+            paid_amount = sum(float(p.get('amount', 0)) for p in payments_data)
+            instance.paid_amount = paid_amount
+            if len(payments_data) > 0 and payments_data[0].get('method'):
+                method = PaymentMethod.objects.filter(id=payments_data[0].get('method')).first()
+                if method:
+                    instance.payment_type = method
+            instance.payments.all().delete()
+            for p in payments_data:
+                amt = float(p.get('amount', 0))
+                if amt > 0:
+                    CashFlow.objects.create(
+                        transaction_type='INCOME',
+                        category='SALE',
+                        amount=amt,
+                        payment_method_id=p.get('method') or (instance.payment_type.id if instance.payment_type else None),
+                        shift=instance.shift,
+                        client=instance.client,
+                        user=instance.user,
+                        sale=instance,
+                        description=f"Payment for Sale #{instance.id} (Yangilangan)"
+                    )
+        elif 'paid_amount' in self.initial_data:
+            instance.paid_amount = Decimal(str(self.initial_data['paid_amount']))
+            cf = instance.payments.first()
+            if cf:
+                cf.amount = instance.paid_amount
+                if instance.payment_type:
+                    cf.payment_method = instance.payment_type
+                cf.client = instance.client
+                cf.save()
+            elif float(instance.paid_amount) > 0:
+                CashFlow.objects.create(
+                    transaction_type='INCOME',
+                    category='SALE',
+                    amount=instance.paid_amount,
+                    payment_method=instance.payment_type,
+                    shift=instance.shift,
+                    client=instance.client,
+                    user=instance.user,
+                    sale=instance,
+                    description=f"Payment for Sale #{instance.id} (Yangilangan)"
+                )
+
+        if 'total_amount' in self.initial_data and items_data is None and services_data is None:
+            instance.total_amount = Decimal(str(self.initial_data['total_amount']))
+
+        instance.debt_amount = max(0, float(instance.total_amount) - float(instance.paid_amount))
 
         # Enforce due_date and sync Debt model
         if float(instance.debt_amount) > 0:
@@ -529,4 +659,30 @@ class PrinterSettingSerializer(serializers.ModelSerializer):
     class Meta:
         model = PrinterSetting
         fields = '__all__'
+
+
+class WorkerTransactionSerializer(serializers.ModelSerializer):
+    worker_name = serializers.SerializerMethodField()
+    created_by_name = serializers.SerializerMethodField()
+    transaction_type_display = serializers.CharField(source='get_transaction_type_display', read_only=True)
+    payment_method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
+
+    class Meta:
+        model = WorkerTransaction
+        fields = [
+            'id', 'worker', 'worker_name', 'transaction_type', 'transaction_type_display',
+            'amount', 'period_month', 'payment_method', 'payment_method_display',
+            'shift', 'cashflow', 'note', 'created_by', 'created_by_name', 'created_at'
+        ]
+        read_only_fields = ['cashflow', 'created_by', 'shift']
+
+    def get_worker_name(self, obj):
+        if obj.worker:
+            return obj.worker.get_full_name() or obj.worker.username or obj.worker.phone_number
+        return ""
+
+    def get_created_by_name(self, obj):
+        if obj.created_by:
+            return obj.created_by.get_full_name() or obj.created_by.username
+        return ""
 

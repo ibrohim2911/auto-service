@@ -45,6 +45,7 @@ class User(AbstractUser, TimeStampedModel):
     phone_number = models.CharField(max_length=20, unique=True, verbose_name="Phone Number (Raqam)")
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='WORKER', verbose_name="Role")
     job = models.CharField(max_length=100, blank=True, null=True, verbose_name="Job")
+    monthly_tool_fee = models.DecimalField(max_digits=15, decimal_places=2, default=0.00, verbose_name="Monthly Tool/Lift Fee (Oylik podyomnik to'lovi)")
     history = HistoricalRecords()
 
     USERNAME_FIELD = 'phone_number'
@@ -98,7 +99,7 @@ class CurrencySetting(TimeStampedModel):
 
 class Product(TimeStampedModel):
     name = models.CharField(max_length=255, verbose_name="Product Name (Nomi)")
-    barcode = models.CharField(max_length=100, unique=True, blank=True, verbose_name="Barcode")
+    barcode = models.CharField(max_length=255, unique=True, blank=True, verbose_name="Barcode")
     image = models.ImageField(upload_to='products/', null=True, blank=True, verbose_name="Image (Rasm)")
     unit = models.ForeignKey(Unit, on_delete=models.SET_NULL, null=True, blank=True, related_name='products', verbose_name="Unit (Olchov)")
     category = models.ForeignKey(Category, on_delete=models.SET_NULL, null=True, blank=True, related_name='products', verbose_name="Category")
@@ -210,6 +211,7 @@ class Client(TimeStampedModel):
     is_company = models.BooleanField(default=False, verbose_name="Is Company? (Tashkilotmi?)")
     phone_number = models.CharField(max_length=20, blank=True, null=True, verbose_name="Phone Number (Tel raqam)")
     account_number = models.CharField(max_length=50, blank=True, null=True, verbose_name="Account Number (Hisob raqam)")
+    worker = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='client_profile', verbose_name="Linked Worker (Bog'langan usta)")
     history = HistoricalRecords()
     
     def __str__(self):
@@ -302,6 +304,23 @@ class SaleItem(TimeStampedModel):
     def __str__(self):
         return f"{self.quantity} x {self.product.name}"
 
+class SaleService(TimeStampedModel):
+    sale = models.ForeignKey(Sale, on_delete=models.CASCADE, related_name='services', verbose_name="Sale (Sotuv)")
+    worker = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='service_earnings', verbose_name="Worker / Mechanic (Usta)")
+    service_name = models.CharField(max_length=255, default="Xizmat haqi", verbose_name="Service Name (Xizmat nomi)")
+    amount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00, verbose_name="Amount UZS (Summa)")
+    amount_usd = models.DecimalField(max_digits=15, decimal_places=4, default=0.0000, verbose_name="Amount USD ($)")
+    history = HistoricalRecords()
+
+    class Meta:
+        verbose_name = "Sale Service"
+        verbose_name_plural = "Sale Services"
+        ordering = ['id']
+
+    def __str__(self):
+        worker_name = self.worker.get_full_name() or self.worker.username if self.worker else "Tayinlanmagan"
+        return f"{self.service_name} ({worker_name}): {self.amount} so'm"
+
 class Shift(TimeStampedModel):
     STATUS_CHOICES = (
         ('OPEN', 'Open (Ochiq)'),
@@ -376,6 +395,49 @@ class Debt(TimeStampedModel):
 
     def __str__(self):
         return f"{self.get_debt_type_display()} - {self.person_name or self.client} ({self.amount})"
+
+
+class WorkerTransaction(TimeStampedModel):
+    TRANSACTION_TYPES = (
+        ('TOOL_FEE', "Asbob-uskuna / Podyomnik to'lovi (Monthly Tool/Lift Fee)"),
+        ('WORKER_DEBT', "Usta qarzi / Avans (Worker Debt / Advance)"),
+        ('PAYOUT', "Hisob-kitob / Oylik to'lov (Payout)"),
+        ('BONUS', "Bonus / Rag'batlantirish (Bonus)"),
+        ('WORKER_PAYMENT', "Ustadan to'lov / Qarz qaytarish (Worker Payment)"),
+    )
+    PAYMENT_METHOD_CHOICES = (
+        ('NONE', "Ichki hisob-kitob / Ushlanma (Internal Ledger)"),
+        ('CASH', "Naqd (Cash)"),
+        ('CARD', "Plastik karta (Card)"),
+        ('TRANSFER', "Hisob raqam / O'tkazma (Bank Transfer)"),
+    )
+
+    worker = models.ForeignKey(User, on_delete=models.CASCADE, related_name='tab_entries', verbose_name="Worker (Usta)")
+    transaction_type = models.CharField(max_length=30, choices=TRANSACTION_TYPES, verbose_name="Transaction Type (Turi)")
+    amount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00, verbose_name="Amount (Summa)")
+    period_month = models.CharField(max_length=7, blank=True, null=True, verbose_name="Period Month (YYYY-MM)")
+    payment_method = models.CharField(max_length=20, choices=PAYMENT_METHOD_CHOICES, default='NONE', verbose_name="Payment Method (To'lov usuli)")
+    shift = models.ForeignKey('Shift', on_delete=models.SET_NULL, null=True, blank=True, related_name='worker_transactions', verbose_name="Shift (Smena)")
+    cashflow = models.OneToOneField('CashFlow', on_delete=models.SET_NULL, null=True, blank=True, related_name='worker_transaction', verbose_name="Linked CashFlow")
+    note = models.TextField(blank=True, default='', verbose_name="Note (Izoh)")
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_worker_transactions', verbose_name="Created By")
+    history = HistoricalRecords()
+
+    class Meta:
+        verbose_name = "Worker Transaction"
+        verbose_name_plural = "Worker Transactions"
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        return f"{self.worker} - {self.get_transaction_type_display()} ({self.amount})"
+
+    def delete(self, *args, **kwargs):
+        if self.cashflow:
+            try:
+                self.cashflow.delete()
+            except Exception:
+                pass
+        return super().delete(*args, **kwargs)
 
 
 class PrinterSetting(TimeStampedModel):

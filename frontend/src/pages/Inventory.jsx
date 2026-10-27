@@ -33,6 +33,7 @@ function Inventory() {
   // Barcode Printing States
   const [barcodeModalProduct, setBarcodeModalProduct] = useState(null);
   const [barcodePrintQty, setBarcodePrintQty] = useState(1);
+  const [selectedBarcode, setSelectedBarcode] = useState('');
   const [isPrintingBarcode, setIsPrintingBarcode] = useState(false);
 
   // Stock Transfer States
@@ -48,7 +49,139 @@ function Inventory() {
   const [transferFromFilter, setTransferFromFilter] = useState('');
   const [transferToFilter, setTransferToFilter] = useState('');
 
-  const handlePrintBarcode = async () => {
+  const printViaBrowser = (labelContent, quantity = 1) => {
+    if (!labelContent) {
+      toast.error("Chop etish uchun etiketka topilmadi");
+      return;
+    }
+    const qty = Math.max(1, parseInt(quantity, 10) || 1);
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'fixed';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = '0';
+    iframe.style.visibility = 'hidden';
+    document.body.appendChild(iframe);
+
+    const isSvg = typeof labelContent === 'string' && labelContent.trim().startsWith('<svg');
+    const singleLabelHtml = isSvg
+      ? labelContent
+      : `<img src="${labelContent}" alt="Barcode" />`;
+
+    const pagesHtml = Array.from({ length: qty })
+      .map(() => `
+        <div class="label-page">
+          ${singleLabelHtml}
+        </div>
+      `)
+      .join('');
+
+    const doc = iframe.contentWindow.document;
+    doc.open();
+    doc.write(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title></title>
+          <style>
+            @page {
+              size: 50mm 30mm;
+              margin: 0 !important;
+            }
+            @media print {
+              @page {
+                size: 50mm 30mm;
+                margin: 0 !important;
+              }
+              html, body {
+                margin: 0 !important;
+                padding: 0 !important;
+                width: 50mm !important;
+                height: 30mm !important;
+                overflow: hidden !important;
+                background: #ffffff !important;
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+              }
+            }
+            * {
+              box-sizing: border-box;
+            }
+            html, body {
+              margin: 0;
+              padding: 0;
+              background: #fff;
+              width: 50mm;
+              height: 30mm;
+            }
+            .label-page {
+              width: 50mm;
+              height: 30mm;
+              page-break-after: always;
+              break-after: page;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              padding: 0;
+              margin: 0;
+              overflow: hidden;
+              background: #fff;
+            }
+            .label-page:last-child {
+              page-break-after: auto;
+              break-after: auto;
+            }
+            svg {
+              width: 50mm;
+              height: 30mm;
+              display: block;
+              shape-rendering: crispEdges;
+            }
+            img {
+              width: 100%;
+              height: 100%;
+              object-fit: contain;
+              image-rendering: -webkit-optimize-contrast;
+              image-rendering: crisp-edges;
+              image-rendering: pixelated;
+            }
+          </style>
+        </head>
+        <body>
+          ${pagesHtml}
+        </body>
+      </html>
+    `);
+    doc.close();
+
+    iframe.contentWindow.focus();
+    setTimeout(() => {
+      try {
+        iframe.contentWindow.print();
+      } catch (e) {
+        console.error(e);
+      }
+      setTimeout(() => {
+        if (document.body.contains(iframe)) {
+          document.body.removeChild(iframe);
+        }
+      }, 2000);
+    }, 300);
+  };
+
+  const handleOpenBarcodeModal = (p) => {
+    setBarcodeModalProduct(p);
+    setBarcodePrintQty(1);
+    const parts = String(p.barcode || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    setSelectedBarcode(parts.length > 0 ? parts[0] : (p.barcode || ''));
+  };
+
+  const handlePrintBarcode = async (forceBrowser = false) => {
     if (!barcodeModalProduct) return;
     const qty = parseInt(barcodePrintQty, 10);
     if (isNaN(qty) || qty <= 0) {
@@ -56,16 +189,58 @@ function Inventory() {
       return;
     }
 
+    const bcToPrint = selectedBarcode || (barcodeModalProduct.barcode ? String(barcodeModalProduct.barcode).split(',')[0].trim() : '');
+
     setIsPrintingBarcode(true);
     try {
+      if (forceBrowser) {
+        const res = await api.post('printers/print-barcode/', {
+          product_id: barcodeModalProduct.id,
+          quantity: qty,
+          barcode: bcToPrint,
+          skip_direct: true
+        });
+        const labelContent = res.data.label_svg || res.data.label_image;
+        if (labelContent) {
+          printViaBrowser(labelContent, qty);
+          toast.success("Windows orqali chop etish oynasi ochildi");
+          setBarcodeModalProduct(null);
+        } else {
+          toast.error("Etiketkani olib bo'lmadi");
+        }
+        return;
+      }
+
+      // 1. Look for direct print first (server or LAN TCP/IP)
       const res = await api.post('printers/print-barcode/', {
         product_id: barcodeModalProduct.id,
-        quantity: qty
+        quantity: qty,
+        barcode: bcToPrint
       });
-      toast.success(res.data.detail || `${qty} dona chiziqli belgi printerga yuborildi!`);
-      setBarcodeModalProduct(null);
+
+      if (res.data.success) {
+        toast.success(res.data.detail || `${qty} dona chiziqli belgi printerga yuborildi!`);
+        setBarcodeModalProduct(null);
+      } else {
+        // 2. Direct print not reachable/configured -> Fallback to Windows/Browser print
+        toast.info("To'g'ridan-to'g'ri printer ulanmagan. Ushbu qurilma (Windows) orqali chop etilmoqda...");
+        const labelContent = res.data.label_svg || res.data.label_image;
+        if (labelContent) {
+          printViaBrowser(labelContent, qty);
+          setBarcodeModalProduct(null);
+        } else {
+          toast.error(res.data.error || "Printerga ulanib bo'lmadi");
+        }
+      }
     } catch (err) {
-      toast.error(err.response?.data?.error || "Printerga yuborishda xatolik yuz berdi");
+      const fallbackContent = err.response?.data?.label_svg || err.response?.data?.label_image;
+      if (fallbackContent) {
+        toast.info("To'g'ridan-to'g'ri printer ulanmagan. Windows orqali chop etilmoqda...");
+        printViaBrowser(fallbackContent, qty);
+        setBarcodeModalProduct(null);
+      } else {
+        toast.error(err.response?.data?.error || "Printerga yuborishda xatolik yuz berdi");
+      }
     } finally {
       setIsPrintingBarcode(false);
     }
@@ -825,10 +1000,7 @@ function Inventory() {
                             className="btn-icon" 
                             title="Chiziqli belgi (Barcode) chop etish"
                             style={{ color: 'var(--primary)' }}
-                            onClick={() => {
-                              setBarcodeModalProduct(p);
-                              setBarcodePrintQty(1);
-                            }}
+                            onClick={() => handleOpenBarcodeModal(p)}
                           >
                             <Printer size={18} />
                           </button>
@@ -1444,121 +1616,214 @@ function Inventory() {
       )}
 
       {/* DYNAMIC BARCODE PRINT MODAL */}
-      {barcodeModalProduct && (
-        <div className="modal-overlay" onClick={() => setBarcodeModalProduct(null)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: '440px' }}>
-            <div className="flex-between mb-4">
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Printer style={{ color: 'var(--primary)' }} size={22} />
-                <h2 style={{ margin: 0, fontSize: '1.2rem' }}>Chiziqli belgi chop etish</h2>
-              </div>
-              <button className="btn-icon" onClick={() => setBarcodeModalProduct(null)}>
-                <X size={18} />
-              </button>
-            </div>
+      {barcodeModalProduct && (() => {
+        const barcodeList = String(barcodeModalProduct.barcode || '')
+          .split(',')
+          .map(b => b.trim())
+          .filter(Boolean);
 
-            {/* Product Preview Card */}
-            <div style={{
-              backgroundColor: 'var(--surface-hover)',
-              borderRadius: '12px',
-              padding: '16px',
-              marginBottom: '20px',
-              border: '1px solid var(--border)'
-            }}>
-              <div style={{ fontWeight: 600, fontSize: '1.05rem', marginBottom: '6px' }}>
-                {barcodeModalProduct.name}
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-                <span>Chiziqli kod: <strong style={{ color: 'var(--text-main)', fontFamily: 'monospace' }}>{barcodeModalProduct.barcode || 'Avtomatik'}</strong></span>
-                <span>Narxi: <strong style={{ color: 'var(--primary)' }}>{parseFloat(barcodeModalProduct.selling_price || 0).toLocaleString()} SO'M</strong></span>
-              </div>
-            </div>
-
-            {/* Dynamic Quantity Selector */}
-            <div style={{ marginBottom: '24px' }}>
-              <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500, fontSize: '0.9rem' }}>
-                Chop etish soni (dona etiketka):
-              </label>
-              
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
-                <button 
-                  type="button" 
-                  className="btn btn-secondary"
-                  style={{ width: '42px', height: '42px', padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                  onClick={() => setBarcodePrintQty(prev => Math.max(1, prev - 1))}
-                >
-                  <Minus size={18} />
+        return (
+          <div className="modal-overlay" onClick={() => setBarcodeModalProduct(null)}>
+            <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: '480px' }}>
+              <div className="flex-between mb-4">
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Printer style={{ color: 'var(--primary)' }} size={22} />
+                  <h2 style={{ margin: 0, fontSize: '1.2rem' }}>Chiziqli belgi chop etish</h2>
+                </div>
+                <button className="btn-icon" onClick={() => setBarcodeModalProduct(null)}>
+                  <X size={18} />
                 </button>
+              </div>
+
+              {/* Product Info Card */}
+              <div style={{
+                backgroundColor: 'var(--surface-hover)',
+                borderRadius: '12px',
+                padding: '16px',
+                marginBottom: '16px',
+                border: '1px solid var(--border)'
+              }}>
+                <div style={{ fontWeight: 600, fontSize: '1.05rem', marginBottom: '8px', color: 'var(--text-main)' }}>
+                  {barcodeModalProduct.name}
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: '0.9rem', flexWrap: 'wrap', gap: '4px' }}>
+                  <span>Tanlangan kod: <strong style={{ color: 'var(--primary)', fontFamily: 'monospace', fontSize: '1rem' }}>{selectedBarcode || 'Avtomatik'}</strong></span>
+                  <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Etiketka: <strong>Narxsiz</strong></span>
+                </div>
+              </div>
+
+              {/* Multiple Barcode Selection (If product has more than 1 barcode/artikul) */}
+              {barcodeList.length > 1 && (
+                <div style={{ marginBottom: '18px' }}>
+                  <label style={{ display: 'block', marginBottom: '8px', fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-main)' }}>
+                    Qaysi shtrix-kod chop etilsin? ({barcodeList.length} ta kod mavjud):
+                  </label>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {barcodeList.map((bc, idx) => {
+                      const isSelected = selectedBarcode === bc;
+                      return (
+                        <div
+                          key={idx}
+                          onClick={() => setSelectedBarcode(bc)}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            padding: '10px 14px',
+                            borderRadius: '10px',
+                            border: isSelected ? '2px solid var(--primary)' : '1px solid var(--border)',
+                            backgroundColor: isSelected ? 'rgba(52, 152, 219, 0.12)' : 'var(--bg-card)',
+                            cursor: 'pointer',
+                            transition: 'all 0.15s ease-in-out'
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <input
+                              type="radio"
+                              name="selected_barcode_option"
+                              checked={isSelected}
+                              onChange={() => setSelectedBarcode(bc)}
+                              style={{ cursor: 'pointer', accentColor: 'var(--primary)' }}
+                            />
+                            <div>
+                              <span style={{
+                                fontFamily: 'monospace',
+                                fontWeight: 700,
+                                fontSize: '1rem',
+                                color: isSelected ? 'var(--primary)' : 'var(--text-main)'
+                              }}>
+                                {bc}
+                              </span>
+                              <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginLeft: '8px' }}>
+                                {idx === 0 ? "(Asosiy shtrix-kod)" : "(Артикул / Qo'shimcha)"}
+                              </span>
+                            </div>
+                          </div>
+                          {isSelected && (
+                            <span style={{
+                              fontSize: '0.75rem',
+                              fontWeight: 600,
+                              color: 'var(--primary)',
+                              backgroundColor: 'rgba(52, 152, 219, 0.2)',
+                              padding: '2px 8px',
+                              borderRadius: '12px'
+                            }}>
+                              Tanlangan
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Dynamic Quantity Selector */}
+              <div style={{ marginBottom: '20px' }}>
+                <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500, fontSize: '0.9rem' }}>
+                  Chop etish soni (dona etiketka):
+                </label>
                 
-                <input 
-                  type="number" 
-                  min="1"
-                  max="1000"
-                  value={barcodePrintQty}
-                  onChange={e => setBarcodePrintQty(Math.max(1, parseInt(e.target.value) || 1))}
-                  className="input-field"
-                  style={{ textAlign: 'center', fontSize: '1.2rem', fontWeight: 'bold', marginBottom: 0, height: '42px' }}
-                />
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
+                  <button 
+                    type="button" 
+                    className="btn btn-secondary"
+                    style={{ width: '42px', height: '42px', padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                    onClick={() => setBarcodePrintQty(prev => Math.max(1, prev - 1))}
+                  >
+                    <Minus size={18} />
+                  </button>
+                  
+                  <input 
+                    type="number" 
+                    min="1"
+                    max="1000"
+                    value={barcodePrintQty}
+                    onChange={e => setBarcodePrintQty(Math.max(1, parseInt(e.target.value) || 1))}
+                    className="input-field"
+                    style={{ textAlign: 'center', fontSize: '1.2rem', fontWeight: 'bold', marginBottom: 0, height: '42px' }}
+                  />
+
+                  <button 
+                    type="button" 
+                    className="btn btn-secondary"
+                    style={{ width: '42px', height: '42px', padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                    onClick={() => setBarcodePrintQty(prev => prev + 1)}
+                  >
+                    <Plus size={18} />
+                  </button>
+                </div>
+
+                {/* Quick presets */}
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  {[1, 5, 10, 20, 50].map(qty => (
+                    <button
+                      key={qty}
+                      type="button"
+                      onClick={() => setBarcodePrintQty(qty)}
+                      style={{
+                        flex: 1,
+                        padding: '6px',
+                        borderRadius: '6px',
+                        border: barcodePrintQty === qty ? '2px solid var(--primary)' : '1px solid var(--border)',
+                        backgroundColor: barcodePrintQty === qty ? 'rgba(52, 152, 219, 0.1)' : 'var(--bg-card)',
+                        color: barcodePrintQty === qty ? 'var(--primary)' : 'var(--text-muted)',
+                        cursor: 'pointer',
+                        fontWeight: 500,
+                        fontSize: '0.85rem'
+                      }}
+                    >
+                      {qty} ta
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Actions: Direct Print (First) with Fallback, and Direct Windows Print */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <button 
+                    type="button" 
+                    className="btn btn-secondary" 
+                    style={{ flex: 1 }}
+                    onClick={() => setBarcodeModalProduct(null)}
+                  >
+                    Bekor qilish
+                  </button>
+                  <button 
+                    type="button" 
+                    className="btn btn-primary" 
+                    style={{ flex: 1.5, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+                    onClick={() => handlePrintBarcode(false)}
+                    disabled={isPrintingBarcode}
+                    title="Avval to'g'ridan-to'g'ri printerni qidiradi, bo'lmasa Windows orqali chiqaradi"
+                  >
+                    <Printer size={16} />
+                    {isPrintingBarcode ? "Yuborilmoqda..." : `Chop etish (${barcodePrintQty} ta)`}
+                  </button>
+                </div>
 
                 <button 
                   type="button" 
-                  className="btn btn-secondary"
-                  style={{ width: '42px', height: '42px', padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                  onClick={() => setBarcodePrintQty(prev => prev + 1)}
+                  className="btn btn-secondary" 
+                  style={{
+                    width: '100%',
+                    fontSize: '0.85rem',
+                    color: 'var(--text-muted)',
+                    borderColor: 'var(--border)',
+                    padding: '8px'
+                  }}
+                  onClick={() => handlePrintBarcode(true)}
+                  disabled={isPrintingBarcode}
+                  title="Ushbu kompyuterdagi mahalliy / LAN printer orqali Windows oynasida chop etish"
                 >
-                  <Plus size={18} />
+                  Ushbu kompyuter (Windows) orqali chop etish
                 </button>
               </div>
-
-              {/* Quick presets */}
-              <div style={{ display: 'flex', gap: '8px' }}>
-                {[1, 5, 10, 20, 50].map(qty => (
-                  <button
-                    key={qty}
-                    type="button"
-                    onClick={() => setBarcodePrintQty(qty)}
-                    style={{
-                      flex: 1,
-                      padding: '6px',
-                      borderRadius: '6px',
-                      border: barcodePrintQty === qty ? '2px solid var(--primary)' : '1px solid var(--border)',
-                      backgroundColor: barcodePrintQty === qty ? 'rgba(52, 152, 219, 0.1)' : 'var(--bg-card)',
-                      color: barcodePrintQty === qty ? 'var(--primary)' : 'var(--text-muted)',
-                      cursor: 'pointer',
-                      fontWeight: 500,
-                      fontSize: '0.85rem'
-                    }}
-                  >
-                    {qty} ta
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Actions */}
-            <div style={{ display: 'flex', gap: '12px' }}>
-              <button 
-                type="button" 
-                className="btn btn-secondary" 
-                style={{ flex: 1 }}
-                onClick={() => setBarcodeModalProduct(null)}
-              >
-                Bekor qilish
-              </button>
-              <button 
-                type="button" 
-                className="btn btn-primary" 
-                style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
-                onClick={handlePrintBarcode}
-                disabled={isPrintingBarcode}
-              >
-                <Printer size={16} />
-                {isPrintingBarcode ? "Yuborilmoqda..." : `${barcodePrintQty} ta chop etish`}
-              </button>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* STOCK TRANSFER MODAL */}
       {isTransferModalOpen && (

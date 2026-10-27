@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Search, ShoppingCart, User, LogOut, Plus, Minus, CreditCard, Banknote, Trash2, Home, PackageOpen, X, Car as CarIcon, UserPlus, Calendar, AlertCircle, Clock, AlertTriangle } from 'lucide-react';
+import { Search, ShoppingCart, User, LogOut, Plus, Minus, CreditCard, Banknote, Trash2, Home, PackageOpen, X, Car as CarIcon, UserPlus, Calendar, AlertCircle, Clock, AlertTriangle, Wrench } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import useAuthStore from '../store';
@@ -12,7 +12,11 @@ import { useDebounce } from '../hooks/useDebounce';
 
 const fetchCategories = async () => {
   const { data } = await api.get('categories/?page_size=100');
-  return [{ id: 'all', name: 'All' }, ...data.results];
+  return [
+    { id: 'all', name: 'Barchasi' },
+    { id: 'top_10_days', name: "🔥 Ko'p sotilganlar (10 kun)" },
+    ...data.results
+  ];
 };
 
 const fetchProducts = async () => {
@@ -20,15 +24,20 @@ const fetchProducts = async () => {
   return data.results;
 };
 
-const CheckoutModal = ({ cart, total, onClose, onSuccess, user, editSale, activeShift, onOpenShift }) => {
+const CheckoutModal = ({ cart, total, services, setServices, onClose, onSuccess, user, editSale, activeShift, onOpenShift }) => {
   const queryClient = useQueryClient();
   const defaultDueDate = useMemo(() => new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0], []);
+  
+  const productsTotal = total;
+  const servicesTotal = (services || []).reduce((sum, s) => sum + (parseFloat(s.amount) || 0), 0);
+  const grandTotal = productsTotal + servicesTotal;
+
   const [formData, setFormData] = useState({ 
     client: editSale?.client || '', 
     car: editSale?.car || '', 
     user: editSale?.user || user?.id || '', 
     due_date: editSale?.due_date || defaultDueDate,
-    payments: editSale ? [{ method: editSale.payment_type || '', amount: parseFloat(editSale.paid_amount) || total }] : [{ method: '', amount: total }] 
+    payments: editSale ? [{ method: editSale.payment_type || '', amount: parseFloat(editSale.paid_amount) || grandTotal }] : [{ method: '', amount: grandTotal }] 
   });
   const [printCashier, setPrintCashier] = useState(true);
   const [printWorker, setPrintWorker] = useState(true);
@@ -51,10 +60,39 @@ const CheckoutModal = ({ cart, total, onClose, onSuccess, user, editSale, active
   });
   const [quickCarLoading, setQuickCarLoading] = useState(false);
 
+  // Worker Client picker sub-modal states
+  const [showWorkerPicker, setShowWorkerPicker] = useState(false);
+  const [workerPickerLoading, setWorkerPickerLoading] = useState(false);
+  const [workerSearchFilter, setWorkerSearchFilter] = useState('');
+
   const { data: users } = useQuery({ queryKey: ['users'], queryFn: async () => (await api.get('users/?page_size=100')).data.results });
   const { data: clients } = useQuery({ queryKey: ['clients'], queryFn: async () => (await api.get('clients/?page_size=500')).data.results });
   const { data: cars } = useQuery({ queryKey: ['cars'], queryFn: async () => (await api.get('cars/?page_size=500')).data.results });
   const { data: paymentMethods } = useQuery({ queryKey: ['payment-methods'], queryFn: async () => (await api.get('payment-methods/?page_size=100')).data.results });
+
+  const clientOptions = useMemo(() => {
+    if (!clients) return [];
+    return clients.map(c => ({
+      value: c.id,
+      label: c.is_worker ? `🛠️ [Usta] ${c.name.replace(/^\[Usta\]\s*/i, '')}` : c.name
+    }));
+  }, [clients]);
+
+  const handleSelectWorkerAsClient = async (workerId) => {
+    if (!workerId) return;
+    setWorkerPickerLoading(true);
+    try {
+      const res = await api.post('clients/get-or-create-for-worker/', { worker_id: workerId });
+      await queryClient.invalidateQueries({ queryKey: ['clients'] });
+      setFormData(prev => ({ ...prev, client: res.data.id }));
+      setShowWorkerPicker(false);
+      toast.success(`${res.data.name} mijoz sifatida tanlandi!`);
+    } catch (err) {
+      toast.error("Ustani mijoz sifatida tanlashda xatolik yuz berdi");
+    } finally {
+      setWorkerPickerLoading(false);
+    }
+  };
 
   // Intelligent Car selection list:
   // Shows all cars (with or without owner), prioritizing selected client's cars.
@@ -172,11 +210,19 @@ const CheckoutModal = ({ cart, total, onClose, onSuccess, user, editSale, active
     }
   };
 
-  const totalPaid = formData.payments.reduce((sum, p) => sum + Number(p.amount), 0);
-  const debt_amount = total - totalPaid;
+  const totalPaid = formData.payments.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+  const debt_amount = Math.max(0, grandTotal - totalPaid);
 
   const submit = async () => {
-    if (formData.payments.some(p => !p.method && p.amount > 0)) return toast.error("Barcha miqdorlar uchun to'lov usulini tanlang");
+    if (cart.length === 0 && (!services || services.length === 0)) {
+      return toast.error("Savatchada mahsulot yoki xizmat bo'lishi kerak!");
+    }
+    for (const s of services || []) {
+      if (parseFloat(s.amount) > 0 && !s.worker) {
+        return toast.error("Iltimos, har bir xizmat uchun ustani tanlang!");
+      }
+    }
+    if (formData.payments.some(p => !p.method && Number(p.amount) > 0)) return toast.error("Barcha miqdorlar uchun to'lov usulini tanlang");
     if (debt_amount > 0 && !formData.due_date) {
       return toast.error("Iltimos, qarz qaytarish muddatini tanlang");
     }
@@ -186,12 +232,24 @@ const CheckoutModal = ({ cart, total, onClose, onSuccess, user, editSale, active
     else if (printCashier) print_type = 'cashier';
     else if (printWorker) print_type = 'worker';
 
+    const validServices = (services || [])
+      .filter(s => parseFloat(s.amount) > 0)
+      .map(s => {
+        const workerObj = users?.find(u => u.id === (s.worker?.id || s.worker));
+        return {
+          worker: s.worker?.id || s.worker || null,
+          worker_name: workerObj?.first_name || workerObj?.username || s.worker_name || '',
+          service_name: s.service_name || "Xizmat haqi",
+          amount: parseFloat(s.amount) || 0
+        };
+      });
+
     const payload = {
       ...formData,
       car: formData.car || null,
       client: formData.client || null,
       due_date: debt_amount > 0 ? (formData.due_date || defaultDueDate) : null,
-      total_amount: total,
+      total_amount: grandTotal,
       debt_amount: debt_amount,
       print: print_type !== 'none',
       print_type: print_type,
@@ -199,7 +257,8 @@ const CheckoutModal = ({ cart, total, onClose, onSuccess, user, editSale, active
         const q = parseFloat(item.qty) || 1;
         const p = parseFloat(item.selling_price) || 0;
         return { product: item.id, quantity: q, price: p, total: p * q };
-      })
+      }),
+      services: validServices
     };
 
     const promise = window.location.search.includes('edit=') 
@@ -342,32 +401,55 @@ const CheckoutModal = ({ cart, total, onClose, onSuccess, user, editSale, active
               <div className="input-group" style={{ flex: 1, marginBottom: 0 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
                   <label style={{ margin: 0, fontWeight: 600, fontSize: '0.85rem' }}>Mijoz</label>
-                  <button
-                    type="button"
-                    onClick={() => setShowQuickClient(true)}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '3px',
-                      fontSize: '0.72rem',
-                      fontWeight: 600,
-                      color: 'var(--primary)',
-                      backgroundColor: 'transparent',
-                      border: '1px solid var(--primary)',
-                      borderRadius: '5px',
-                      padding: '2px 7px',
-                      cursor: 'pointer',
-                      transition: 'all 0.15s ease'
-                    }}
-                    title="Yangi mijoz qo'shish"
-                  >
-                    <Plus size={12} /> Yangi
-                  </button>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <button
+                      type="button"
+                      onClick={() => setShowWorkerPicker(true)}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '3px',
+                        fontSize: '0.72rem',
+                        fontWeight: 600,
+                        color: '#8b5cf6',
+                        backgroundColor: 'rgba(139, 92, 246, 0.08)',
+                        border: '1px solid #8b5cf6',
+                        borderRadius: '5px',
+                        padding: '2px 7px',
+                        cursor: 'pointer',
+                        transition: 'all 0.15s ease'
+                      }}
+                      title="Ustani mijoz sifatida tanlash (Nasiyaga tovar berish)"
+                    >
+                      <Wrench size={12} /> Usta
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowQuickClient(true)}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '3px',
+                        fontSize: '0.72rem',
+                        fontWeight: 600,
+                        color: 'var(--primary)',
+                        backgroundColor: 'transparent',
+                        border: '1px solid var(--primary)',
+                        borderRadius: '5px',
+                        padding: '2px 7px',
+                        cursor: 'pointer',
+                        transition: 'all 0.15s ease'
+                      }}
+                      title="Yangi mijoz qo'shish"
+                    >
+                      <Plus size={12} /> Yangi
+                    </button>
+                  </div>
                 </div>
                 <SearchableSelect
                   value={formData.client}
                   onChange={handleClientSelect}
-                  options={clients?.map(c => ({ value: c.id, label: c.name })) || []}
+                  options={clientOptions}
                   placeholder="Yo'q (Oddiy mijoz)"
                 />
               </div>
@@ -409,9 +491,192 @@ const CheckoutModal = ({ cart, total, onClose, onSuccess, user, editSale, active
               </div>
             </div>
 
+            {/* Usta va Xizmat haqi Section */}
+            <div style={{
+              marginBottom: '18px',
+              padding: '14px 16px',
+              backgroundColor: 'var(--surface-hover)',
+              border: '1px solid var(--border)',
+              borderRadius: '14px'
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: (services && services.length > 0) ? '12px' : '6px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Wrench size={17} color="var(--primary)" />
+                  <span style={{ fontWeight: 700, fontSize: '0.88rem' }}>Usta va Xizmat haqi</span>
+                  {services && services.length > 0 && (
+                    <span style={{
+                      fontSize: '0.72rem',
+                      backgroundColor: 'rgba(99, 102, 241, 0.15)',
+                      color: 'var(--primary)',
+                      fontWeight: 700,
+                      padding: '2px 8px',
+                      borderRadius: '10px'
+                    }}>
+                      {services.length} ta
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const updated = [...(services || []), { worker: '', service_name: 'Xizmat haqi', amount: '' }];
+                    setServices(updated);
+                  }}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    fontSize: '0.78rem',
+                    fontWeight: 600,
+                    color: 'var(--primary)',
+                    backgroundColor: 'rgba(99, 102, 241, 0.1)',
+                    border: '1px solid rgba(99, 102, 241, 0.25)',
+                    borderRadius: '7px',
+                    padding: '3px 9px',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease'
+                  }}
+                >
+                  <Plus size={13} /> Xizmat qo'shish
+                </button>
+              </div>
+
+              {(!services || services.length === 0) ? (
+                <div style={{
+                  padding: '10px 12px',
+                  fontSize: '0.8rem',
+                  color: 'var(--text-muted)',
+                  border: '1px dashed var(--border)',
+                  borderRadius: '8px',
+                  backgroundColor: 'var(--surface)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center'
+                }}>
+                  <span>Usta xizmati biriktirilmagan</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setServices([{ worker: '', service_name: 'Xizmat haqi', amount: '' }]);
+                    }}
+                    style={{
+                      fontSize: '0.75rem',
+                      color: 'var(--primary)',
+                      background: 'none',
+                      border: 'none',
+                      fontWeight: 600,
+                      cursor: 'pointer'
+                    }}
+                  >
+                    + Biriktirish
+                  </button>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {services.map((svc, idx) => (
+                    <div 
+                      key={idx}
+                      style={{
+                        padding: '10px 12px',
+                        backgroundColor: 'var(--surface)',
+                        border: '1px solid var(--border)',
+                        borderRadius: '10px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '6px'
+                      }}
+                    >
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        <div style={{ flex: 1.3 }}>
+                          <SearchableSelect
+                            value={svc.worker?.id || svc.worker}
+                            onChange={v => {
+                              const updated = [...services];
+                              const found = users?.find(u => u.id === v);
+                              updated[idx].worker = v;
+                              updated[idx].worker_name = found?.first_name || found?.username || '';
+                              setServices(updated);
+                            }}
+                            options={(users?.filter(u => u.role === 'WORKER') || users || []).map(u => ({
+                              value: u.id,
+                              label: `${u.first_name || u.username}${u.job ? ` (${u.job})` : ''}`
+                            }))}
+                            placeholder="Ustani tanlang..."
+                          />
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <input
+                            type="number"
+                            value={svc.amount}
+                            onChange={e => {
+                              const updated = [...services];
+                              updated[idx].amount = e.target.value;
+                              setServices(updated);
+                            }}
+                            className="input-field"
+                            style={{ marginBottom: 0, fontWeight: 600, fontSize: '0.9rem' }}
+                            placeholder="Xizmat narxi..."
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-icon"
+                          style={{ color: 'var(--danger)', width: '30px', height: '30px' }}
+                          onClick={() => {
+                            setServices(services.filter((_, i) => i !== idx));
+                          }}
+                          title="O'chirish"
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                      <div>
+                        <input
+                          type="text"
+                          value={svc.service_name}
+                          onChange={e => {
+                            const updated = [...services];
+                            updated[idx].service_name = e.target.value;
+                            setServices(updated);
+                          }}
+                          className="input-field"
+                          style={{ marginBottom: 0, fontSize: '0.8rem', padding: '5px 8px' }}
+                          placeholder="Xizmat tavsifi (Xodovoy, Motor, Moy almashtirish...)"
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             <div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                <label style={{ margin: 0, fontWeight: 600, fontSize: '0.85rem' }}>To'lov usullari</label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <label style={{ margin: 0, fontWeight: 600, fontSize: '0.85rem' }}>To'lov usullari</label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (formData.payments.length > 0) {
+                        const newPayments = [...formData.payments];
+                        newPayments[0].amount = grandTotal;
+                        setFormData({ ...formData, payments: newPayments });
+                      }
+                    }}
+                    style={{
+                      fontSize: '0.72rem',
+                      fontWeight: 600,
+                      color: '#10b981',
+                      background: 'rgba(16, 185, 129, 0.1)',
+                      border: '1px solid rgba(16, 185, 129, 0.25)',
+                      borderRadius: '5px',
+                      padding: '2px 6px',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    To'liq summa
+                  </button>
+                </div>
                 <button 
                   type="button" 
                   onClick={() => {
@@ -490,16 +755,28 @@ const CheckoutModal = ({ cart, total, onClose, onSuccess, user, editSale, active
               border: '1px solid var(--border)',
               marginBottom: '16px'
             }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Mahsulotlar:</span>
+                <span style={{ fontSize: '0.95rem', fontWeight: 600 }}>{productsTotal.toLocaleString()} SO'M</span>
+              </div>
+              {servicesTotal > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', color: 'var(--primary)' }}>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>Xizmat haqi:</span>
+                  <span style={{ fontSize: '0.95rem', fontWeight: 700 }}>+{servicesTotal.toLocaleString()} SO'M</span>
+                </div>
+              )}
               <div style={{ 
                 display: 'flex', 
                 justifyContent: 'space-between', 
                 alignItems: 'center', 
                 marginBottom: '10px',
+                paddingTop: '6px',
                 paddingBottom: '8px',
+                borderTop: '1px dashed var(--border)',
                 borderBottom: '1px dashed var(--border)'
               }}>
-                <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Jami to'lov miqdori:</span>
-                <span style={{ fontSize: '1.05rem', fontWeight: 700 }}>{total.toLocaleString()} SO'M</span>
+                <span style={{ color: 'var(--text-main)', fontSize: '0.9rem', fontWeight: 700 }}>Jami to'lov miqdori:</span>
+                <span style={{ fontSize: '1.15rem', fontWeight: 800, color: 'var(--primary)' }}>{grandTotal.toLocaleString()} SO'M</span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                 <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>To'landi:</span>
@@ -835,6 +1112,117 @@ const CheckoutModal = ({ cart, total, onClose, onSuccess, user, editSale, active
             </div>
           </div>
         )}
+        {/* Worker Client Picker Sub-modal */}
+        {showWorkerPicker && (
+          <div 
+            className="modal-overlay" 
+            style={{ zIndex: 1200, backgroundColor: 'rgba(0, 0, 0, 0.7)' }}
+            onClick={(e) => { if (e.target === e.currentTarget) setShowWorkerPicker(false); }}
+          >
+            <div className="modal-content" style={{ maxWidth: '480px', width: '92%' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                <h3 style={{ margin: 0, fontSize: '1.2rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px', color: '#8b5cf6' }}>
+                  <Wrench size={20} /> Ustani mijoz sifatida tanlash
+                </h3>
+                <button 
+                  type="button" 
+                  className="btn-icon" 
+                  onClick={() => setShowWorkerPicker(false)}
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: 0, marginBottom: '14px' }}>
+                Usta o'z ehtiyoji yoki qarzdorligi uchun tovar/ehtiyot qism olayotganda uni mijoz qilib biriktiring. Bu qarz <strong>Ustalar hisobi (Tabel)</strong> da avtomatik kuzatiladi.
+              </p>
+
+              <div style={{ marginBottom: '14px' }}>
+                <input
+                  type="text"
+                  placeholder="Ustaning ismi yoki telefonini qidiring..."
+                  value={workerSearchFilter}
+                  onChange={e => setWorkerSearchFilter(e.target.value)}
+                  className="input-field"
+                  style={{ marginBottom: 0, fontSize: '0.86rem' }}
+                  autoFocus
+                />
+              </div>
+
+              <div style={{ maxHeight: '280px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {users?.filter(u => u.role === 'WORKER' || u.job).filter(u => {
+                  if (!workerSearchFilter) return true;
+                  const q = workerSearchFilter.toLowerCase();
+                  const name = (u.first_name || u.username || '').toLowerCase();
+                  const phone = (u.phone_number || '').toLowerCase();
+                  const job = (u.job || '').toLowerCase();
+                  return name.includes(q) || phone.includes(q) || job.includes(q);
+                }).map(w => (
+                  <div
+                    key={w.id}
+                    onClick={() => handleSelectWorkerAsClient(w.id)}
+                    style={{
+                      padding: '10px 14px',
+                      borderRadius: '10px',
+                      border: '1px solid var(--border)',
+                      backgroundColor: 'var(--surface)',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease'
+                    }}
+                    onMouseOver={e => e.currentTarget.style.backgroundColor = 'var(--surface-hover)'}
+                    onMouseOut={e => e.currentTarget.style.backgroundColor = 'var(--surface)'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <div style={{
+                        width: '32px',
+                        height: '32px',
+                        borderRadius: '8px',
+                        backgroundColor: 'rgba(139, 92, 246, 0.15)',
+                        color: '#8b5cf6',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontWeight: 700
+                      }}>
+                        {w.first_name ? w.first_name.charAt(0) : 'U'}
+                      </div>
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: '0.9rem', color: 'var(--text-main)' }}>
+                          {w.first_name || w.username} {w.last_name || ''}
+                        </div>
+                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                          {w.job || 'Usta'} • {w.phone_number || 'Tel yo\'q'}
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={workerPickerLoading}
+                      className="btn btn-secondary"
+                      style={{ fontSize: '0.78rem', height: '30px', padding: '0 10px' }}
+                    >
+                      Tanlash
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '16px' }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setShowWorkerPicker(false)}
+                >
+                  Yopish
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -847,6 +1235,7 @@ function POS() {
     const saved = localStorage.getItem('pos_cart');
     return saved ? JSON.parse(saved) : [];
   });
+  const [posServices, setPosServices] = useState([]);
   const [isCheckout, setIsCheckout] = useState(false);
   const receiptRef = React.useRef();
   const handlePrint = useReactToPrint({
@@ -934,9 +1323,13 @@ function POS() {
   const { data: productsData, isLoading: prodsLoading } = useQuery({ 
     queryKey: ['products', debouncedSearch, activeCategory], 
     queryFn: async () => {
-      let url = 'products/?page_size=100&';
+      let url = 'products/?page_size=100&ordering=-recent_sales_qty,-id&';
       if (debouncedSearch) url += `search=${encodeURIComponent(debouncedSearch)}&`;
-      if (activeCategory !== 'all') url += `category=${activeCategory}&`;
+      if (activeCategory === 'top_10_days') {
+        url += 'most_sold_10_days=true&';
+      } else if (activeCategory !== 'all') {
+        url += `category=${activeCategory}&`;
+      }
       const { data } = await api.get(url);
       return data.results;
     }
@@ -960,6 +1353,14 @@ function POS() {
         };
       });
       setCart(editCart);
+      if (editSale.services && editSale.services.length > 0) {
+        setPosServices(editSale.services.map(s => ({
+          worker: s.worker,
+          worker_name: s.worker_name,
+          service_name: s.service_name,
+          amount: parseFloat(s.amount)
+        })));
+      }
       sessionStorage.setItem(`loaded_edit_${editId}`, 'true');
     }
   }, [editSale, allProducts]);
@@ -1029,12 +1430,37 @@ function POS() {
   };
 
   const updatePrice = (id, newPrice) => {
-    setCart(prev => prev.map(item => item.id === id ? { ...item, selling_price: newPrice } : item));
+    setCart(prev => prev.map(item => item.id === id ? { ...item, selling_price: newPrice, total_override: undefined } : item));
+  };
+
+  const updateTotal = (id, newTotal) => {
+    setCart(prev => prev.map(item => {
+      if (item.id === id) {
+        const qty = parseFloat(item.qty) || 1;
+        const totalNum = parseFloat(newTotal);
+        if (!isNaN(totalNum) && qty > 0) {
+          const rawPrice = totalNum / qty;
+          const calculatedPrice = Math.round(rawPrice * 100) / 100;
+          return {
+            ...item,
+            selling_price: calculatedPrice,
+            total_override: newTotal
+          };
+        }
+        return {
+          ...item,
+          total_override: newTotal
+        };
+      }
+      return item;
+    }));
   };
 
   const removeFromCart = (id) => setCart(prev => prev.filter(item => item.id !== id));
 
   const total = cart.reduce((sum, item) => sum + ((parseFloat(item.selling_price) || 0) * (parseFloat(item.qty) || 0)), 0);
+  const servicesTotal = posServices.reduce((sum, s) => sum + (parseFloat(s.amount) || 0), 0);
+  const grandTotal = total + servicesTotal;
 
   return (
     <div className="pos-container">
@@ -1128,6 +1554,12 @@ function POS() {
               <div 
                 key={c.id} 
                 className={`category-pill ${activeCategory === c.id ? 'active' : ''}`}
+                style={c.id === 'top_10_days' ? {
+                  fontWeight: 700,
+                  borderColor: activeCategory === 'top_10_days' ? '#ea580c' : 'rgba(234, 88, 12, 0.4)',
+                  backgroundColor: activeCategory === 'top_10_days' ? '#ea580c' : 'rgba(234, 88, 12, 0.08)',
+                  color: activeCategory === 'top_10_days' ? '#fff' : '#ea580c'
+                } : {}}
                 onClick={() => setActiveCategory(c.id)}
               >
                 {c.name}
@@ -1139,10 +1571,11 @@ function POS() {
         <div className="product-grid">
           {prodsLoading ? (
             Array.from({ length: 12 }).map((_, i) => (
-              <div key={i} className="product-card" style={{ animation: 'pulse 1.5s infinite', backgroundColor: 'var(--surface)', padding: '14px', minHeight: '95px' }}>
-                <div style={{ height: '14px', backgroundColor: 'var(--border)', borderRadius: '4px', marginBottom: '8px' }}></div>
-                <div style={{ height: '14px', width: '70%', backgroundColor: 'var(--border)', borderRadius: '4px', marginBottom: '12px' }}></div>
-                <div style={{ height: '16px', width: '50%', backgroundColor: 'var(--border)', borderRadius: '4px', marginTop: 'auto' }}></div>
+              <div key={i} className="product-card" style={{ animation: 'pulse 1.5s infinite', backgroundColor: 'var(--surface)', padding: '10px 12px', minHeight: '108px' }}>
+                <div style={{ height: '14px', backgroundColor: 'var(--border)', borderRadius: '4px', marginBottom: '6px' }}></div>
+                <div style={{ height: '14px', width: '70%', backgroundColor: 'var(--border)', borderRadius: '4px', marginBottom: '8px' }}></div>
+                <div style={{ height: '12px', width: '90%', backgroundColor: 'var(--border)', borderRadius: '4px', marginBottom: '8px' }}></div>
+                <div style={{ height: '16px', width: '55%', backgroundColor: 'var(--border)', borderRadius: '4px', marginTop: 'auto' }}></div>
               </div>
             ))
           ) : filteredProducts.length === 0 ? (
@@ -1152,27 +1585,52 @@ function POS() {
               <p>Qidiruv yoki toifa filtrini o'zgartirib ko'ring.</p>
             </div>
           ) : (
-            filteredProducts.map(p => (
-              <div key={p.id} className="product-card" onClick={() => addToCart(p)}>
-                {p.image && (
-                  <img src={p.image} alt={p.name} className="product-card-img" />
-                )}
-                <div className="product-info">
-                  <div className="product-name" title={p.name}>
-                    {p.name}
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.78rem', color: 'var(--text-muted)', margin: '4px 0' }}>
-                    <span>Qoldiq: <strong style={{ color: parseFloat(p.total_quantity || 0) > 0 ? 'var(--text-main)' : 'var(--danger)' }}>{Number(parseFloat(p.total_quantity || 0).toFixed(2)) % 1 === 0 ? parseInt(p.total_quantity || 0) : parseFloat(p.total_quantity || 0)} {p.unit_name || ''}</strong></span>
-                    <span>Tan: <strong style={{ color: 'var(--text-main)' }}>{parseFloat(p.cost_price || 0).toLocaleString()} SO'M</strong></span>
-                  </div>
-                  <div className="product-price" style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '4px', marginTop: 'auto' }}>
-                    <span style={{ fontWeight: 700, color: 'var(--primary)', fontSize: '0.95rem' }}>
-                      {parseFloat(p.selling_price || 0).toLocaleString()} SO'M
-                    </span>
+            filteredProducts.map(p => {
+              const stockQty = parseFloat(p.total_quantity || 0);
+              const isOutOfStock = stockQty <= 0;
+              const formattedQty = Number(stockQty.toFixed(2)) % 1 === 0 ? parseInt(stockQty) : stockQty;
+              const costVal = parseFloat(p.cost_price || 0);
+              const formattedCost = Math.round(costVal).toLocaleString();
+              const sellingVal = parseFloat(p.selling_price || 0);
+              const formattedSelling = Math.round(sellingVal).toLocaleString();
+
+              return (
+                <div key={p.id} className="product-card" onClick={() => addToCart(p)}>
+                  {p.image && (
+                    <img src={p.image} alt={p.name} className="product-card-img" />
+                  )}
+                  <div className="product-info">
+                    <div className="product-name" title={p.name}>
+                      {p.name || 'Nomsiz mahsulot'}
+                    </div>
+                    <div className="product-card-meta">
+                      <span className="product-stock" style={{ color: isOutOfStock ? 'var(--danger)' : 'var(--text-muted)' }}>
+                        Qoldiq: <strong style={{ color: isOutOfStock ? 'var(--danger)' : 'var(--text-main)' }}>{formattedQty} {p.unit_name || ''}</strong>
+                      </span>
+                      {costVal > 0 && (
+                        <span className="product-cost" title={`Tan narxi: ${formattedCost} SO'M`}>
+                          Tan: <strong>{formattedCost}</strong>
+                        </span>
+                      )}
+                    </div>
+                    <div className="product-card-footer">
+                      <span style={{ color: 'var(--primary)', fontWeight: 700, fontSize: '0.95rem', lineHeight: 1.2, whiteSpace: 'nowrap' }}>
+                        {formattedSelling} SO'M
+                      </span>
+                      {parseFloat(p.recent_sales_qty || 0) > 0 && (
+                        <div 
+                          className="product-recent-sales-badge"
+                          title={`Oxirgi 10 kunda ${p.recent_sales_qty} ta sotilgan`}
+                        >
+                          <span className="badge-flame">🔥</span>
+                          <span className="badge-text">{Number(parseFloat(p.recent_sales_qty || 0).toFixed(0))} ta (10 kun)</span>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       </main>
@@ -1199,77 +1657,163 @@ function POS() {
               <p>Savatcha bo'sh</p>
             </div>
           ) : (
-            cart.map(item => (
-              <div key={item.id} className="cart-item">
-                <div className="cart-item-info">
-                  <div className="cart-item-name" style={{ fontSize: '0.9rem' }}>{item.name}</div>
-                  <input 
-                    type="number" 
-                    value={item.selling_price} 
-                    onChange={e => updatePrice(item.id, e.target.value)}
-                    style={{ width: '80px', padding: '4px 8px', borderRadius: '4px', border: '1px solid var(--border)', backgroundColor: 'var(--bg-color)', color: 'var(--text-main)', fontSize: '0.85rem', marginTop: '4px' }}
-                  />
+            cart.map(item => {
+              const costPriceVal = parseFloat(item.cost_price || 0);
+              const formattedCostPrice = Math.round(costPriceVal).toLocaleString();
+              const stockVal = parseFloat(item.total_quantity || 0);
+              const formattedStock = Number(stockVal.toFixed(2)) % 1 === 0 ? parseInt(stockVal) : stockVal;
+
+              return (
+                <div key={item.id} className="cart-card">
+                  <div className="cart-card-header">
+                    <div className="cart-card-name" title={item.name}>
+                      {item.name}
+                    </div>
+                    <button 
+                      type="button"
+                      className="cart-card-delete" 
+                      onClick={() => removeFromCart(item.id)} 
+                      title="O'chirish"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+
+                  <div className="cart-card-meta">
+                    <span className="cart-card-cost" title={`Tan narxi: ${formattedCostPrice} SO'M`}>
+                      Tan narxi: <strong>{formattedCostPrice} SO'M</strong>
+                    </span>
+                    {item.total_quantity !== undefined && (
+                      <span className="cart-card-stock" style={{ color: stockVal <= 0 ? 'var(--danger)' : 'var(--text-muted)' }}>
+                        Qoldiq: <strong style={{ color: stockVal <= 0 ? 'var(--danger)' : 'var(--text-main)' }}>{formattedStock} {item.unit_name || ''}</strong>
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="cart-card-controls">
+                    <div className="cart-field-col">
+                      <label className="cart-field-label">Dona narxi</label>
+                      <input 
+                        type="number" 
+                        step="any"
+                        title="1 dona narxi"
+                        value={item.selling_price} 
+                        onChange={e => updatePrice(item.id, e.target.value)}
+                        className="cart-field-input"
+                      />
+                    </div>
+
+                    <div className="cart-field-col cart-qty-col">
+                      <label className="cart-field-label" style={{ textAlign: 'center' }}>Miqdor</label>
+                      <div className="cart-qty-wrapper">
+                        <button type="button" className="cart-qty-btn" onClick={() => updateQty(item.id, -1)}><Minus size={13} /></button>
+                        <input
+                          type="number"
+                          step="any"
+                          min="0.001"
+                          title="Miqdor"
+                          value={item.qty}
+                          onChange={e => {
+                            const val = e.target.value;
+                            setCart(prev => prev.map(it => it.id === item.id ? { ...it, qty: val, total_override: undefined } : it));
+                          }}
+                          onBlur={e => {
+                            const parsed = parseFloat(item.qty);
+                            const finalQty = (!isNaN(parsed) && parsed > 0) ? parsed : 1;
+                            setCart(prev => prev.map(it => it.id === item.id ? { ...it, qty: finalQty } : it));
+                          }}
+                          className="cart-qty-val"
+                        />
+                        <button type="button" className="cart-qty-btn" onClick={() => updateQty(item.id, 1)}><Plus size={13} /></button>
+                      </div>
+                    </div>
+
+                    <div className="cart-field-col cart-total-col">
+                      <label className="cart-field-label" style={{ textAlign: 'right' }}>Jami summa</label>
+                      <input
+                        type="number"
+                        step="any"
+                        title="Umumiy summa (o'zgartirsangiz dona narxi avtomatik hisoblanadi)"
+                        placeholder="Jami"
+                        value={item.total_override !== undefined ? item.total_override : (Math.round((parseFloat(item.selling_price) || 0) * (parseFloat(item.qty) || 0)) || '')}
+                        onChange={e => updateTotal(item.id, e.target.value)}
+                        onBlur={() => {
+                          setCart(prev => prev.map(it => it.id === item.id ? { ...it, total_override: undefined } : it));
+                        }}
+                        className="cart-field-input cart-total-input"
+                      />
+                    </div>
+                  </div>
                 </div>
-                <div className="qty-control">
-                  <button className="qty-btn" onClick={() => updateQty(item.id, -1)}><Minus size={14} /></button>
-                  <input
-                    type="number"
-                    step="any"
-                    min="0.001"
-                    value={item.qty}
-                    onChange={e => {
-                      const val = e.target.value;
-                      setCart(prev => prev.map(it => it.id === item.id ? { ...it, qty: val } : it));
-                    }}
-                    onBlur={e => {
-                      const parsed = parseFloat(item.qty);
-                      const finalQty = (!isNaN(parsed) && parsed > 0) ? parsed : 1;
-                      setCart(prev => prev.map(it => it.id === item.id ? { ...it, qty: finalQty } : it));
-                    }}
-                    style={{
-                      width: '54px',
-                      height: '28px',
-                      textAlign: 'center',
-                      padding: '2px 4px',
-                      borderRadius: '6px',
-                      border: '1px solid var(--border)',
-                      backgroundColor: 'var(--bg-color)',
-                      color: 'var(--text-main)',
-                      fontWeight: 600,
-                      fontSize: '0.88rem'
-                    }}
-                  />
-                  <button className="qty-btn" onClick={() => updateQty(item.id, 1)}><Plus size={14} /></button>
-                </div>
-                <div className="item-total" style={{ fontSize: '0.9rem' }}>
-                  {((parseFloat(item.selling_price) || 0) * (parseFloat(item.qty) || 0)).toLocaleString()}
-                </div>
-                <button className="btn-icon" onClick={() => removeFromCart(item.id)} style={{ color: 'var(--danger)', marginLeft: '4px' }}>
-                  <Trash2 size={16} />
-                </button>
+              );
+            })
+          )}
+
+          {posServices.length > 0 && (
+            <div style={{ marginTop: '12px', borderTop: '1px dashed var(--border)', paddingTop: '10px' }}>
+              <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--primary)', marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <Wrench size={13} /> Xizmatlar:
               </div>
-            ))
+              {posServices.map((svc, idx) => (
+                <div key={`svc-${idx}`} className="cart-item" style={{ borderLeft: '3px solid var(--primary)', padding: '8px 10px', marginBottom: '6px' }}>
+                  <div className="item-info">
+                    <div className="item-name" style={{ fontSize: '0.85rem' }}>
+                      {svc.service_name || "Xizmat haqi"}
+                    </div>
+                    <div className="item-price" style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                      {svc.worker_name ? `Usta: ${svc.worker_name}` : "Usta biriktirilgan"}
+                    </div>
+                  </div>
+                  <div className="item-total" style={{ fontSize: '0.88rem', color: 'var(--primary)', fontWeight: 700 }}>
+                    {(parseFloat(svc.amount) || 0).toLocaleString()}
+                  </div>
+                  <button className="btn-icon" onClick={() => setPosServices(prev => prev.filter((_, i) => i !== idx))} style={{ color: 'var(--danger)', marginLeft: '4px' }}>
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              ))}
+            </div>
           )}
         </div>
 
         <div className="cart-footer">
           <div className="cart-summary">
             <div className="summary-row">
-              <span>Oraliq miqdor</span>
+              <span>Mahsulotlar</span>
               <span>{total.toLocaleString()} SO'M</span>
             </div>
+            {servicesTotal > 0 && (
+              <div className="summary-row" style={{ color: 'var(--primary)', fontWeight: 600 }}>
+                <span>Xizmat haqi</span>
+                <span>+{servicesTotal.toLocaleString()} SO'M</span>
+              </div>
+            )}
             <div className="summary-row total">
               <span>Jami</span>
-              <span>{total.toLocaleString()} SO'M</span>
+              <span>{grandTotal.toLocaleString()} SO'M</span>
             </div>
           </div>
           
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+            <button 
+              type="button"
+              onClick={() => {
+                setPosServices(prev => [...prev, { worker: '', service_name: "Xizmat haqi", amount: '' }]);
+                setIsCheckout(true);
+              }}
+              className="btn btn-secondary"
+              style={{ flex: 1, padding: '10px 12px', fontSize: '0.88rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+            >
+              <Wrench size={16} /> + Xizmat qo'shish
+            </button>
+          </div>
+
           <div style={{ display: 'flex', gap: '12px', marginBottom: '16px' }}>
             <button onClick={() => {
-              if (cart.length === 0) return toast.error("Savatcha bo'sh!");
+              if (cart.length === 0 && posServices.length === 0) return toast.error("Savatchada mahsulot yoki xizmat bo'lishi kerak!");
               setIsCheckout(true);
             }} className="btn btn-primary" style={{ flex: 1, padding: '16px', fontSize: '1.1rem' }}>
-              To'lov qilish
+              To'lov qilish ({grandTotal.toLocaleString()} SO'M)
             </button>
           </div>
         </div>
@@ -1279,6 +1823,8 @@ function POS() {
         <CheckoutModal 
           cart={cart} 
           total={total} 
+          services={posServices}
+          setServices={setPosServices}
           user={user}
           editSale={editSale}
           activeShift={activeShift}
@@ -1286,6 +1832,7 @@ function POS() {
           onClose={() => setIsCheckout(false)} 
           onSuccess={() => {
             setCart([]);
+            setPosServices([]);
             if (editId) {
               sessionStorage.removeItem(`loaded_edit_${editId}`);
               setSearchParams({});
@@ -1536,7 +2083,7 @@ function POS() {
         </div>
       )}
       
-      <Receipt ref={receiptRef} cart={cart} total={total} user={user} />
+      <Receipt ref={receiptRef} cart={cart} services={posServices} total={grandTotal} user={user} />
     </div>
   );
 }

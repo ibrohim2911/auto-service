@@ -1,9 +1,15 @@
 import django_filters
-from .models import Product, Sale, CashFlow, Debt, ProductReceipt, Shift, StockTransfer
+from .models import Product, Sale, CashFlow, Debt, ProductReceipt, Shift, StockTransfer, WorkerTransaction
 
 class ProductFilter(django_filters.FilterSet):
     min_price = django_filters.NumberFilter(field_name="selling_price", lookup_expr='gte')
     max_price = django_filters.NumberFilter(field_name="selling_price", lookup_expr='lte')
+    most_sold_10_days = django_filters.BooleanFilter(method='filter_most_sold_10_days')
+
+    def filter_most_sold_10_days(self, queryset, name, value):
+        if value:
+            return queryset.filter(recent_sales_qty__gt=0)
+        return queryset
     
     class Meta:
         model = Product
@@ -71,4 +77,13 @@ class StockTransferFilter(django_filters.FilterSet):
     class Meta:
         model = StockTransfer
         fields = ['product', 'from_location', 'to_location', 'user']
+
+class WorkerTransactionFilter(django_filters.FilterSet):
+    start_date = django_filters.DateTimeFilter(field_name="created_at", lookup_expr='gte')
+    end_date = django_filters.DateTimeFilter(field_name="created_at", lookup_expr='lte')
+    
+    class Meta:
+        model = WorkerTransaction
+        fields = ['worker', 'transaction_type', 'period_month', 'payment_method']
+
 

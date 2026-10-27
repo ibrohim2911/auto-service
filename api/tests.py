@@ -2,7 +2,8 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 from rest_framework import status
 from api.models import (
-    User, Product, Sale, SaleItem, Client, Car, PaymentMethod, PrinterSetting, Unit, Inventory, StockTransfer, Debt
+    User, Product, Sale, SaleItem, Client, Car, PaymentMethod, PrinterSetting, Unit, Inventory, StockTransfer, Debt,
+    SaleService, WorkerTransaction, Shift, CashFlow
 )
 from api.printer_service import (
     format_cashier_cheque, format_worker_cheque, format_barcode_labels,
@@ -26,7 +27,7 @@ class PrinterTests(TestCase):
 
         self.product = Product.objects.create(
             name="Moy Filtr C-110",
-            barcode="78901234",
+            barcode="2010867156169",
             cost_price=30000,
             selling_price=45000,
             unit=self.unit
@@ -84,8 +85,13 @@ class PrinterTests(TestCase):
         self.assertIn("AUTO LUX SERVICE", text)
         self.assertIn("No", text)
         self.assertNotIn("№", text)
+        self.assertIn("nomi", text)
+        self.assertIn("soni", text)
+        self.assertIn("narxi", text)
+        self.assertIn("jami", text)
         self.assertIn("Moy Filtr C-110", text)
-        self.assertIn("90,000", text)
+        self.assertIn("45,000", text)  # Unit price
+        self.assertIn("90,000", text)  # Sum price
         self.assertIn("Jami:", text)
         self.assertIn("Chegirma:", text)
         self.assertIn("xaridingiz uchun rahmat", text)
@@ -139,13 +145,30 @@ class PrinterTests(TestCase):
         labels_bytes_5 = format_barcode_labels(self.product, quantity=5, setting=barcode_setting)
         text_5 = labels_bytes_5.decode('utf-8', errors='ignore')
         self.assertIn("PRINT 5, 1", text_5)
-        self.assertIn("78901234", text_5)
+        self.assertIn("2010867156169", text_5)
+        self.assertIn('"EAN13"', text_5)
         self.assertIn("Moy Filtr C-110", text_5)
+        # Barcode must NOT contain price
+        self.assertNotIn("Narxi", text_5)
+        self.assertNotIn("45000", text_5)
 
         # Test printing 12 labels
         labels_bytes_12 = format_barcode_labels(self.product, quantity=12, setting=barcode_setting)
         text_12 = labels_bytes_12.decode('utf-8', errors='ignore')
         self.assertIn("PRINT 12, 1", text_12)
+
+    def test_barcode_label_svg_no_price(self):
+        from api.printer_service import get_barcode_label_svg
+        svg = get_barcode_label_svg(self.product.id)
+        self.assertIsNotNone(svg)
+        self.assertTrue(svg.startswith('<svg'))
+        self.assertIn('shape-rendering:crispEdges', svg)
+        self.assertIn(self.product.name, svg)
+        # EAN-13 split digits
+        self.assertIn("010867", svg)
+        self.assertIn("156169", svg)
+        self.assertNotIn('Narxi', svg)
+        self.assertNotIn('45000', svg)
 
     def test_api_list_printers(self):
         response = self.client.get('/api/printers/')
@@ -166,6 +189,8 @@ class PrinterTests(TestCase):
         })
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data.get('quantity'), 7)
+        self.assertIn('label_svg', response.data)
+        self.assertIn('label_image', response.data)
 
     def test_api_print_sale_cashier_and_worker(self):
         # Print cashier cheque
@@ -554,6 +579,205 @@ class DebtExpireDateTests(TestCase):
         sale.refresh_from_db()
         self.assertEqual(float(sale.debt_amount), 60000.0)
         self.assertEqual(float(sale.paid_amount), 140000.0)
+
+
+class WorkerTabTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.cashier = User.objects.create_user(
+            phone_number="+998901112233",
+            username="cashier_user",
+            first_name="Kassir",
+            role="CASHIER"
+        )
+        self.worker1 = User.objects.create_user(
+            phone_number="+998902223344",
+            username="usta_ali",
+            first_name="Ali",
+            role="WORKER",
+            job="Motorchi",
+            monthly_tool_fee=300000.00
+        )
+        self.worker2 = User.objects.create_user(
+            phone_number="+998903334455",
+            username="usta_vali",
+            first_name="Vali",
+            role="WORKER",
+            job="Xodovoychi",
+            monthly_tool_fee=250000.00
+        )
+        self.company = Client.objects.create(
+            name="Orient Logistics MCHJ",
+            phone_number="+998910001122",
+            is_company=True
+        )
+        self.car = Car.objects.create(
+            plate_number="01 A 777 AA",
+            car_type="Chevrolet Gentra",
+            owner=self.company
+        )
+        self.payment_method = PaymentMethod.objects.create(name="Naqd")
+        self.unit = Unit.objects.create(name="Dona", short_name="dona")
+        self.part = Product.objects.create(
+            name="Amortizator",
+            barcode="11223344",
+            cost_price=100000,
+            selling_price=150000,
+            unit=self.unit
+        )
+        Inventory.objects.create(product=self.part, quantity=10, location='STORE')
+
+    def test_pos_sale_with_service_fee_and_product(self):
+        # 1. Create a sale with 1 product (150,000) + 1 service fee for worker1 (200,000)
+        # Total should be 350,000. Paid 0, Debt 350,000.
+        payload = {
+            'user': self.cashier.id,
+            'client': self.company.id,
+            'car': self.car.id,
+            'total_amount': 350000.0,
+            'paid_amount': 0.0,
+            'debt_amount': 350000.0,
+            'due_date': '2026-11-01',
+            'payments': [],
+            'items': [
+                {'product': self.part.id, 'quantity': 1, 'price': 150000.0, 'total': 150000.0}
+            ],
+            'services': [
+                {'worker': self.worker1.id, 'service_name': "Amortizator almashtirish", 'amount': 200000.0}
+            ]
+        }
+        res = self.client.post('/api/sales/', payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        sale_id = res.data['id']
+
+        sale = Sale.objects.get(id=sale_id)
+        self.assertEqual(float(sale.total_amount), 350000.0)
+        self.assertEqual(float(sale.debt_amount), 350000.0)
+        self.assertEqual(sale.services.count(), 1)
+        self.assertEqual(sale.services.first().worker, self.worker1)
+
+        # 2. Check Worker Tab for worker1
+        tab_res = self.client.get(f'/api/worker-tabs/{self.worker1.id}/')
+        self.assertEqual(tab_res.status_code, status.HTTP_200_OK)
+        summary = tab_res.data['summary']
+
+        # Total service earned should be 200,000
+        self.assertEqual(summary['total_service_earned'], 200000.0)
+        # Since sale is 100% on debt, paid_service_earned is 0, unpaid_company_debt_service is 200,000
+        self.assertEqual(summary['paid_service_earned'], 0.0)
+        self.assertEqual(summary['unpaid_company_debt_service'], 200000.0)
+
+        # 3. Company pays off half the debt (175,000 out of 350,000 = 50%)
+        debt = Debt.objects.get(sale=sale)
+        debt_patch = self.client.patch(f'/api/debts/{debt.id}/', {
+            'paid_amount': 175000.0,
+            'status': 'PARTIAL'
+        }, format='json')
+        self.assertEqual(debt_patch.status_code, status.HTTP_200_OK)
+
+        # Refresh Worker Tab: 50% of the service fee should now be realized!
+        tab_res2 = self.client.get(f'/api/worker-tabs/{self.worker1.id}/')
+        summary2 = tab_res2.data['summary']
+        self.assertEqual(summary2['paid_service_earned'], 100000.0)
+        self.assertEqual(summary2['unpaid_company_debt_service'], 100000.0)
+
+        # 4. Company pays full remaining debt
+        self.client.patch(f'/api/debts/{debt.id}/', {
+            'paid_amount': 350000.0,
+            'status': 'PAID'
+        }, format='json')
+
+        tab_res3 = self.client.get(f'/api/worker-tabs/{self.worker1.id}/')
+        summary3 = tab_res3.data['summary']
+        self.assertEqual(summary3['paid_service_earned'], 200000.0)
+        self.assertEqual(summary3['unpaid_company_debt_service'], 0.0)
+
+    def test_worker_deductions_and_balances(self):
+        # 1. Charge monthly tool fee
+        fee_res = self.client.post('/api/worker-tabs/charge-monthly-tool-fee/', {
+            'worker_id': self.worker1.id,
+            'period_month': '2026-10'
+        }, format='json')
+        self.assertEqual(fee_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(fee_res.data['charged_count'], 1)
+
+        # 2. Worker takes an advance
+        adv_res = self.client.post('/api/worker-transactions/', {
+            'worker': self.worker1.id,
+            'transaction_type': 'WORKER_DEBT',
+            'amount': 50000.0,
+            'period_month': '2026-10',
+            'payment_method': 'NONE',
+            'note': 'Avans'
+        }, format='json')
+        self.assertEqual(adv_res.status_code, status.HTTP_201_CREATED)
+
+        # 3. Check worker tab balances:
+        # Tool fee = 300,000, Worker debt = 50,000. Total deductions = 350,000.
+        tab_res = self.client.get(f'/api/worker-tabs/{self.worker1.id}/?month=2026-10')
+        self.assertEqual(tab_res.status_code, status.HTTP_200_OK)
+        summary = tab_res.data['summary']
+        self.assertEqual(summary['total_tool_fees'], 300000.0)
+        self.assertEqual(summary['total_worker_debts'], 50000.0)
+        self.assertEqual(summary['total_deductions'], 350000.0)
+        self.assertEqual(summary['net_balance_total'], -350000.0)
+
+    def test_all_workers_comparison_list(self):
+        res = self.client.get('/api/worker-tabs/?month=2026-10')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn('workers', res.data)
+        worker_ids = [w['id'] for w in res.data['workers']]
+        self.assertIn(self.worker1.id, worker_ids)
+        self.assertIn(self.worker2.id, worker_ids)
+
+    def test_dashboard_stats_periods(self):
+        # Create a sale with products + service
+        sale = Sale.objects.create(
+            user=self.cashier,
+            client=self.company,
+            car=self.car,
+            payment_type=self.payment_method,
+            total_amount=250000.0,
+            paid_amount=150000.0,
+            debt_amount=100000.0
+        )
+        SaleItem.objects.create(
+            sale=sale,
+            product=self.part,
+            quantity=1,
+            price=150000.0,
+            total=150000.0,
+            total_cost=100000.0
+        )
+        SaleService.objects.create(
+            sale=sale,
+            worker=self.worker1,
+            service_name="Usta tekshiruvi",
+            amount=100000.0
+        )
+
+        # Test 'today'
+        res_today = self.client.get('/api/dashboard-stats/?period=today')
+        self.assertEqual(res_today.status_code, status.HTTP_200_OK)
+        self.assertIn('financial_summary', res_today.data)
+        self.assertIn('live_snapshot', res_today.data)
+        self.assertIn('chartData', res_today.data)
+        self.assertIn('top_workers', res_today.data)
+        self.assertIn('recentSales', res_today.data)
+
+        # Test '7days'
+        res_7d = self.client.get('/api/dashboard-stats/?period=7days')
+        self.assertEqual(res_7d.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_7d.data['financial_summary']['total_revenue'], 250000.0)
+        self.assertEqual(res_7d.data['financial_summary']['product_revenue'], 150000.0)
+        self.assertEqual(res_7d.data['financial_summary']['service_revenue'], 100000.0)
+
+        # Test 'custom' date range
+        res_custom = self.client.get('/api/dashboard-stats/?date_from=2026-10-01&date_to=2026-10-31')
+        self.assertEqual(res_custom.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_custom.data['period_info']['period'], 'custom')
+
+
 
 
 

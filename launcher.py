@@ -6,6 +6,51 @@ import threading
 import webbrowser
 from pathlib import Path
 
+# Provide a safe dummy writer for windowed mode so loggers/print never crash
+class _NullWriter:
+    def write(self, *args, **kwargs): pass
+    def flush(self, *args, **kwargs): pass
+
+def setup_console():
+    """
+    In Windows GUI / --noconsole mode, standard handles (sys.stdout/sys.stderr) are None
+    unless redirected/piped.
+    If the executable was run from a console (CMD, PowerShell, terminal) without redirection,
+    attach to the parent console so that CLI commands (migrate, createsuperuser, etc.)
+    print their output directly to the terminal.
+    """
+    if sys.platform == 'win32':
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        ATTACH_PARENT_PROCESS = ctypes.c_ulong(0xFFFFFFFF).value
+
+        # Only attach to console if sys.stdout or sys.stderr is None (not already redirected/piped)
+        if sys.stdout is None or sys.stderr is None:
+            attached = False
+            try:
+                if kernel32.AttachConsole(ATTACH_PARENT_PROCESS):
+                    attached = True
+            except Exception:
+                pass
+
+            if attached:
+                try:
+                    if sys.stdout is None:
+                        sys.stdout = open('CONOUT$', 'w', encoding='utf-8', errors='replace', buffering=1)
+                    if sys.stderr is None:
+                        sys.stderr = open('CONOUT$', 'w', encoding='utf-8', errors='replace', buffering=1)
+                    if sys.stdin is None:
+                        sys.stdin = open('CONIN$', 'r', encoding='utf-8', errors='replace')
+                except Exception:
+                    pass
+
+    if sys.stdout is None:
+        sys.stdout = _NullWriter()
+    if sys.stderr is None:
+        sys.stderr = _NullWriter()
+
+setup_console()
+
 # Ensure BUNDLE_DIR or current directory is in sys.path
 if getattr(sys, 'frozen', False):
     basedir = Path(sys._MEIPASS).resolve()
@@ -105,9 +150,34 @@ def wait_and_open_browser(port):
     print(f"Opening browser at: {target_url}\n")
     webbrowser.open(target_url)
 
+def run_auto_migrations():
+    """Automatically apply any pending migrations to the SQLite database on startup."""
+    try:
+        from django.core.management import call_command
+        print("Checking and applying database migrations...")
+        call_command('migrate', interactive=False)
+        print("Database schema is up to date.")
+    except Exception as e:
+        print(f"[Warning] Auto-migration check encountered an issue: {e}")
+
+def ensure_default_superuser():
+    """Ensure at least one admin account exists when starting with a fresh database."""
+    try:
+        from api.models import User
+        if not User.objects.filter(is_superuser=True).exists():
+            print("[INFO] No superuser found. Creating default admin user (admin / admin)...")
+            User.objects.create_superuser('admin', 'admin@example.com', 'admin', role='ADMIN')
+            print("[INFO] Default admin user created successfully.")
+    except Exception:
+        pass
+
 def start_server(host='0.0.0.0', port=8000, auto_open=True):
     from waitress import serve
     from config.wsgi import application
+
+    # Automatically ensure database migrations and default superuser are ready
+    run_auto_migrations()
+    ensure_default_superuser()
 
     actual_port = find_free_port(host, port)
     if actual_port != port:
@@ -177,11 +247,14 @@ def main():
         start_server(host=host, port=port, auto_open=True)
         return
 
-    # Map user alias 'migration' / 'migrations' -> 'migrate'
-    if first_arg in ('migration', 'migrations'):
+    # Map user alias 'makemigrations' / 'makemigration' / 'migration' / 'migrations' -> 'migrate'
+    if first_arg in ('makemigrations', 'makemigration', 'migration', 'migrations'):
+        if first_arg in ('makemigrations', 'makemigration'):
+            print("\n[INFO] In packaged .exe mode, all migration files are already bundled.")
+            print("[INFO] Executing 'migrate' to apply database schema updates to db.sqlite3...\n")
         sys.argv[1] = 'migrate'
 
-    # Delegate all other commands to Django's management utility (migrate, makemigrations, createsuperuser, shell, etc.)
+    # Delegate all other commands to Django's management utility (migrate, createsuperuser, shell, etc.)
     from django.core.management import execute_from_command_line
     execute_from_command_line(sys.argv)
 

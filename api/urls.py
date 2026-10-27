@@ -4,7 +4,7 @@ from .views import (
     UserViewSet, CategoryViewSet, UnitViewSet, PaymentMethodViewSet, ProductViewSet, InventoryViewSet,
     StockTransferViewSet, ClientViewSet, CarViewSet, ProductReceiptViewSet, ProductReceiptItemViewSet,
     SaleViewSet, SaleItemViewSet, ShiftViewSet, CashFlowViewSet, LoginView, LogoutView, DebtViewSet, DashboardStatsView,
-    PrinterSettingViewSet, CurrencySettingViewSet
+    PrinterSettingViewSet, CurrencySettingViewSet, SaleServiceViewSet, WorkerTransactionViewSet, WorkerTabViewSet
 )
 
 router = DefaultRouter()
@@ -21,6 +21,9 @@ router.register(r'receipts', ProductReceiptViewSet)
 router.register(r'receipt-items', ProductReceiptItemViewSet)
 router.register(r'sales', SaleViewSet)
 router.register(r'sale-items', SaleItemViewSet)
+router.register(r'sale-services', SaleServiceViewSet)
+router.register(r'worker-transactions', WorkerTransactionViewSet)
+router.register(r'worker-tabs', WorkerTabViewSet, basename='worker-tabs')
 router.register(r'shifts', ShiftViewSet)
 router.register(r'cash-flow', CashFlowViewSet)
 router.register(r'debts', DebtViewSet)
@@ -33,3 +36,4 @@ urlpatterns = [
     path('dashboard-stats/', DashboardStatsView.as_view(), name='dashboard_stats'),
     path('', include(router.urls)),
 ]
+

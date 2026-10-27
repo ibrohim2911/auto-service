@@ -823,6 +823,35 @@ export default function Shifts() {
                 </div>
               </div>
 
+              {/* Payment Methods Breakdown for Close Modal */}
+              {shiftToCloseSummary?.payment_methods_summary && Object.keys(shiftToCloseSummary.payment_methods_summary).length > 0 && (
+                <div style={{
+                  marginBottom: '16px',
+                  padding: '12px 16px',
+                  backgroundColor: 'var(--surface)',
+                  border: '1px solid var(--border)',
+                  borderRadius: '10px'
+                }}>
+                  <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '8px', textTransform: 'uppercase' }}>
+                    To'lov turlari bo'yicha tushumlar:
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '8px' }}>
+                    {Object.entries(shiftToCloseSummary.payment_methods_summary).map(([method, amt]) => (
+                      <div key={method} style={{
+                        padding: '6px 10px',
+                        borderRadius: '6px',
+                        backgroundColor: 'var(--surface-hover)',
+                        border: '1px solid var(--border)',
+                        fontSize: '0.82rem'
+                      }}>
+                        <div style={{ color: 'var(--text-muted)', fontSize: '0.74rem' }}>{method}:</div>
+                        <div style={{ fontWeight: 700, color: 'var(--text-main)', marginTop: '2px' }}>{formatMoney(amt)}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Input for Money on Hand (Actual Cash) */}
               <div style={{ marginBottom: '18px' }}>
                 <label style={{ display: 'block', fontSize: '0.92rem', fontWeight: 700, marginBottom: '6px' }}>

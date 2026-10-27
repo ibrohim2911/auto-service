@@ -74,35 +74,69 @@ class Command(BaseCommand):
         products_data = []
         seen_barcodes = set()
 
+        header_map = {}
+
         for event, elem in context:
             if elem.tag == f'{ns}row':
                 r = int(elem.get('r', 0))
-                if r > 2: # row 1 is empty, row 2 is header
-                    row_dict = {}
-                    for c in elem.findall(f'{ns}c'):
-                        ref = c.get('r', '')
-                        m = col_letter.match(ref)
-                        if m:
-                            col = m.group(1)
-                            t = c.get('t')
-                            v = c.find(f'{ns}v')
-                            val = v.text if v is not None else ''
-                            if t == 's' and val != '':
-                                val = strings[int(val)] if int(val) < len(strings) else val
-                            row_dict[col] = val.strip() if isinstance(val, str) else val
+                row_dict = {}
+                for c in elem.findall(f'{ns}c'):
+                    ref = c.get('r', '')
+                    m = col_letter.match(ref)
+                    if m:
+                        col = m.group(1)
+                        t = c.get('t')
+                        v = c.find(f'{ns}v')
+                        val = v.text if v is not None else ''
+                        if t == 's' and val != '':
+                            val = strings[int(val)] if int(val) < len(strings) else val
+                        row_dict[col] = val.strip() if isinstance(val, str) else val
 
-                    name = row_dict.get('B', '')
+                if r == 2:
+                    # Dynamically inspect header row
+                    for col, val in row_dict.items():
+                        txt = str(val).lower()
+                        if 'артикул' in txt or 'artikul' in txt:
+                            header_map['artikul'] = col
+                        elif 'штрих' in txt or 'barcode' in txt:
+                            header_map['barcode'] = col
+                        elif 'код' in txt or 'code' in txt:
+                            header_map['code'] = col
+                        elif 'наименование' in txt or 'nomi' in txt:
+                            header_map['name'] = col
+                        elif 'количество' in txt:
+                            header_map['qty'] = col
+                        elif 'себестоимость' in txt:
+                            header_map['cost'] = col
+                        elif 'реализации' in txt:
+                            header_map['selling'] = col
+                        elif 'изм' in txt:
+                            header_map['unit'] = col
+
+                elif r > 2:
+                    name_col = header_map.get('name', 'B')
+                    name = row_dict.get(name_col, '')
                     if name:
-                        code = str(row_dict.get('A', '')).strip()
-                        raw_barcode = str(row_dict.get('J', '')).strip()
-                        raw_unit = str(row_dict.get('G', '')).strip().lower()
+                        code = str(row_dict.get(header_map.get('code', 'A'), '')).strip()
+                        raw_barcode = str(row_dict.get(header_map.get('barcode', 'J'), '')).strip()
+                        raw_artikul = str(row_dict.get(header_map.get('artikul', 'F'), '')).strip()
+                        raw_unit = str(row_dict.get(header_map.get('unit', 'G'), '')).strip().lower()
 
-                        cost_price = self.parse_decimal(row_dict.get('I'))
-                        selling_price = self.parse_decimal(row_dict.get('L'))
-                        quantity = self.parse_quantity(row_dict.get('C'))
+                        cost_price = self.parse_decimal(row_dict.get(header_map.get('cost', 'I')))
+                        selling_price = self.parse_decimal(row_dict.get(header_map.get('selling', 'L')))
+                        quantity = self.parse_quantity(row_dict.get(header_map.get('qty', 'C')))
 
-                        # Determine unique barcode
-                        barcode = raw_barcode
+                        # Combine raw_barcode and artikul
+                        bc_parts = []
+                        if raw_barcode:
+                            for part in raw_barcode.split(','):
+                                p_clean = part.strip()
+                                if p_clean and p_clean not in bc_parts:
+                                    bc_parts.append(p_clean)
+                        if raw_artikul and raw_artikul not in bc_parts:
+                            bc_parts.append(raw_artikul)
+
+                        barcode = ', '.join(bc_parts)
                         if not barcode or barcode in seen_barcodes:
                             barcode = code if code and code not in seen_barcodes else f"{code or 'item'}_{len(products_data)+1}"
 
@@ -111,7 +145,7 @@ class Command(BaseCommand):
                         products_data.append({
                             'code': code,
                             'name': name[:255],
-                            'barcode': barcode[:100],
+                            'barcode': barcode[:255],
                             'unit_str': raw_unit,
                             'cost_price': cost_price,
                             'selling_price': selling_price,

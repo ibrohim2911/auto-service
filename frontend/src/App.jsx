@@ -1,6 +1,6 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
-import { LayoutDashboard, ShoppingBag, Package, Wallet, Users, Settings, LogOut, Clock, FileText } from 'lucide-react';
+import { LayoutDashboard, ShoppingBag, Package, Wallet, Users, Settings, LogOut, Clock, FileText, Wrench } from 'lucide-react';
 import { Toaster } from 'react-hot-toast';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import useAuthStore from './store';
@@ -13,6 +13,7 @@ import Clients from './pages/Clients';
 import CashFlow from './pages/CashFlow';
 import Sales from './pages/Sales';
 import Shifts from './pages/Shifts';
+import WorkerTabs from './pages/WorkerTabs';
 
 import Dashboard from './pages/Dashboard';
 import SettingsPage from './pages/Settings';
@@ -37,6 +38,7 @@ function Sidebar() {
     { path: '/sales', icon: <ShoppingBag size={20} />, label: 'Sotuvlar tarixi' },
     { path: '/cashflow', icon: <Wallet size={20} />, label: 'Pul oqimi' },
     { path: '/debts', icon: <FileText size={20} />, label: 'Tashqi qarzlar' },
+    { path: '/worker-tabs', icon: <Wrench size={20} />, label: 'Ustalar hisobi (Tabel)' },
     { path: '/clients', icon: <Users size={20} />, label: 'Mijozlar' },
     { path: '/settings', icon: <Settings size={20} />, label: 'Sozlamalar' },
   ];
@@ -110,6 +112,8 @@ function App() {
                   <Route path="/sales" element={<Sales />} />
                   <Route path="/cashflow" element={<CashFlow />} />
                   <Route path="/debts" element={<Debts />} />
+                  <Route path="/worker-tabs" element={<WorkerTabs />} />
+                  <Route path="/ustalar" element={<WorkerTabs />} />
                   <Route path="/clients" element={<Clients />} />
                   <Route path="/settings" element={<SettingsPage />} />
                 </Routes>

@@ -215,6 +215,8 @@ export default function Debts() {
 
       queryClient.invalidateQueries({ queryKey: ['debts'] });
       queryClient.invalidateQueries({ queryKey: ['cashflow'] });
+      queryClient.invalidateQueries({ queryKey: ['worker-tabs'] });
+      queryClient.invalidateQueries({ queryKey: ['worker-tab'] });
       toast.success('To\'lov muvaffaqiyatli saqlandi');
       setIsPaymentModalOpen(false);
       setEditingDebt(null);
