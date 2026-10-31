@@ -1,9 +1,10 @@
+from decimal import Decimal
 from django.test import TestCase
 from rest_framework.test import APIClient
 from rest_framework import status
 from api.models import (
     User, Product, Sale, SaleItem, Client, Car, PaymentMethod, PrinterSetting, Unit, Inventory, StockTransfer, Debt,
-    SaleService, WorkerTransaction, Shift, CashFlow
+    SaleService, WorkerTransaction, Shift, CashFlow, ClientTransaction
 )
 from api.printer_service import (
     format_cashier_cheque, format_worker_cheque, format_barcode_labels,
@@ -730,6 +731,99 @@ class WorkerTabTests(TestCase):
         self.assertIn(self.worker1.id, worker_ids)
         self.assertIn(self.worker2.id, worker_ids)
 
+    def test_worker_debt_breakdown_and_settlement(self):
+        # 1. Create a cash advance
+        adv_res = self.client.post('/api/worker-transactions/', {
+            'worker': self.worker1.id,
+            'transaction_type': 'WORKER_DEBT',
+            'amount': 100000.0,
+            'period_month': '2026-10',
+            'payment_method': 'NONE',
+            'note': 'Advance 100k'
+        }, format='json')
+        self.assertEqual(adv_res.status_code, status.HTTP_201_CREATED)
+        adv_id = adv_res.data['id']
+
+        # 2. Charge tool fee
+        fee_res = self.client.post('/api/worker-tabs/charge-monthly-tool-fee/', {
+            'worker_id': self.worker1.id,
+            'period_month': '2026-10'
+        }, format='json')
+        self.assertEqual(fee_res.status_code, status.HTTP_200_OK)
+
+        # 3. Create spare parts debt for worker
+        worker_client = Client.objects.create(
+            name=self.worker1.get_full_name() or self.worker1.username,
+            phone_number=self.worker1.phone_number,
+            worker=self.worker1
+        )
+        worker_sale = Sale.objects.create(
+            user=self.cashier,
+            client=worker_client,
+            payment_type=self.payment_method,
+            total_amount=50000.0,
+            paid_amount=0.0,
+            debt_amount=50000.0
+        )
+
+        # 4. Check balances in retrieve
+        tab_res = self.client.get(f'/api/worker-tabs/{self.worker1.id}/?month=2026-10')
+        self.assertEqual(tab_res.status_code, status.HTTP_200_OK)
+        summary = tab_res.data['summary']
+        self.assertEqual(summary['cash_advance_balance'], 100000.0)
+        self.assertEqual(summary['tool_fee_balance'], 300000.0)
+        self.assertEqual(summary['goods_debt_balance'], 50000.0)
+        self.assertEqual(summary['total_unpaid_debt'], 450000.0)
+        self.assertEqual(len(tab_res.data['open_debts']), 3)
+
+        # 5. Settle advance via salary deduction
+        settle_adv = self.client.post('/api/worker-transactions/settle-debt/', {
+            'worker_id': self.worker1.id,
+            'debt_type': 'CASH_ADVANCE',
+            'transaction_id': adv_id,
+            'amount': 100000.0,
+            'payment_method': 'SALARY_DEDUCTION',
+            'note': 'Deduct advance from salary'
+        }, format='json')
+        self.assertEqual(settle_adv.status_code, status.HTTP_200_OK)
+
+        # Verify paired PAYOUT created and CashFlow is None
+        repayment_tx = WorkerTransaction.objects.get(pk=settle_adv.data['transaction_id'])
+        self.assertIsNone(repayment_tx.cashflow)
+        paired_payout = WorkerTransaction.objects.filter(
+            worker=self.worker1,
+            transaction_type='PAYOUT',
+            payment_method='SALARY_DEDUCTION',
+            related_debt_id=adv_id
+        ).first()
+        self.assertIsNotNone(paired_payout)
+        self.assertIsNone(paired_payout.cashflow)
+
+        # 6. Settle spare parts sale via CASH
+        settle_sale = self.client.post('/api/worker-transactions/settle-debt/', {
+            'worker_id': self.worker1.id,
+            'debt_type': 'SPARE_PARTS',
+            'sale_id': worker_sale.id,
+            'amount': 50000.0,
+            'payment_method': 'CASH',
+            'note': 'Pay parts in cash'
+        }, format='json')
+        self.assertEqual(settle_sale.status_code, status.HTTP_200_OK)
+
+        # Verify sale is now paid
+        worker_sale.refresh_from_db()
+        self.assertEqual(float(worker_sale.debt_amount), 0.0)
+        self.assertEqual(float(worker_sale.paid_amount), 50000.0)
+
+        # 7. Check tab balances again
+        tab_res2 = self.client.get(f'/api/worker-tabs/{self.worker1.id}/?month=2026-10')
+        s2 = tab_res2.data['summary']
+        self.assertEqual(s2['cash_advance_balance'], 0.0)
+        self.assertEqual(s2['goods_debt_balance'], 0.0)
+        self.assertEqual(s2['tool_fee_balance'], 300000.0)
+        self.assertEqual(s2['total_unpaid_debt'], 300000.0)
+        self.assertEqual(len(tab_res2.data['open_debts']), 1)
+
     def test_dashboard_stats_periods(self):
         # Create a sale with products + service
         sale = Sale.objects.create(
@@ -776,6 +870,393 @@ class WorkerTabTests(TestCase):
         res_custom = self.client.get('/api/dashboard-stats/?date_from=2026-10-01&date_to=2026-10-31')
         self.assertEqual(res_custom.status_code, status.HTTP_200_OK)
         self.assertEqual(res_custom.data['period_info']['period'], 'custom')
+
+
+class OrganizationTabTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(username='org_admin', role='ADMIN', phone_number='+998901112233')
+        self.cashier = User.objects.create_user(username='org_cashier', role='CASHIER', phone_number='+998902223344')
+        self.worker1 = User.objects.create_user(username='org_mechanic1', role='WORKER', first_name='Sardor', phone_number='+998903334455')
+        self.worker2 = User.objects.create_user(username='org_mechanic2', role='WORKER', first_name='Rustam', phone_number='+998904445566')
+
+        self.client.force_authenticate(user=self.admin)
+
+        self.payment_method = PaymentMethod.objects.create(name='Perechisleniye')
+        self.cash_method = PaymentMethod.objects.create(name='Naqd pul')
+
+        self.shift = Shift.objects.create(user=self.cashier, starting_cash=500000.0, status='OPEN')
+
+        self.org = Client.objects.create(
+            name="Orient Logistics MCHJ",
+            is_company=True,
+            inn="301234567",
+            account_number="20208000900112233001",
+            phone_number="+998712001122"
+        )
+
+        self.car = Car.objects.create(plate_number="01A777AA", owner=self.org, car_type="Isuzu")
+
+    def test_organization_kpis_and_locked_worker_commissions(self):
+        # Create Sale 1 with worker services
+        sale1 = Sale.objects.create(
+            user=self.cashier,
+            client=self.org,
+            car=self.car,
+            payment_type=self.payment_method,
+            total_amount=500000.0,
+            paid_amount=200000.0,
+            debt_amount=300000.0
+        )
+        SaleService.objects.create(
+            sale=sale1,
+            worker=self.worker1,
+            service_name="Dvigatel ta'mirlash",
+            amount=200000.0
+        )
+        SaleService.objects.create(
+            sale=sale1,
+            worker=self.worker2,
+            service_name="Elektr montaj",
+            amount=100000.0
+        )
+
+        # Create Sale 2 with no payments yet
+        sale2 = Sale.objects.create(
+            user=self.cashier,
+            client=self.org,
+            car=self.car,
+            payment_type=self.payment_method,
+            total_amount=200000.0,
+            paid_amount=0.0,
+            debt_amount=200000.0
+        )
+        SaleService.objects.create(
+            sale=sale2,
+            worker=self.worker1,
+            service_name="Moy almashtirish",
+            amount=50000.0
+        )
+
+        # In sale 1: ratio = 200,000 / 500,000 = 0.4
+        # Worker 1: realized = 80,000, pending = 120,000
+        # Worker 2: realized = 40,000, pending = 60,000
+        # In sale 2: ratio = 0.0
+        # Worker 1: realized = 0, pending = 50,000
+        # Total locked worker commissions = 120,000 + 60,000 + 50,000 = 230,000
+
+        # Check list endpoint
+        res = self.client.get('/api/organization-tabs/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res.data['organizations']), 1)
+        org_data = res.data['organizations'][0]
+        self.assertEqual(org_data['total_billed'], 700000.0)
+        self.assertEqual(org_data['total_paid'], 200000.0)
+        self.assertEqual(org_data['total_debt'], 500000.0)
+        self.assertEqual(org_data['locked_worker_commissions'], 230000.0)
+        self.assertEqual(org_data['open_sales_count'], 2)
+
+        # Check retrieve endpoint
+        ret_res = self.client.get(f'/api/organization-tabs/{self.org.id}/')
+        self.assertEqual(ret_res.status_code, status.HTTP_200_OK)
+        sum_data = ret_res.data['summary']
+        self.assertEqual(sum_data['total_debt'], 500000.0)
+        self.assertEqual(sum_data['locked_worker_commissions'], 230000.0)
+        self.assertEqual(len(ret_res.data['unpaid_sales']), 2)
+
+    def test_pay_debt_specific_sale_and_unlocks_worker_earnings(self):
+        sale = Sale.objects.create(
+            user=self.cashier,
+            client=self.org,
+            car=self.car,
+            payment_type=self.payment_method,
+            total_amount=400000.0,
+            paid_amount=0.0,
+            debt_amount=400000.0
+        )
+        SaleService.objects.create(
+            sale=sale,
+            worker=self.worker1,
+            service_name="Xodovoy ta'mirlash",
+            amount=100000.0
+        )
+
+        # Worker's initial tab check: realized = 0, pending = 100,000
+        w_tab_before = self.client.get(f'/api/worker-tabs/{self.worker1.id}/')
+        self.assertEqual(w_tab_before.data['summary']['paid_service_earned'], 0.0)
+        self.assertEqual(w_tab_before.data['summary']['unpaid_company_debt_service'], 100000.0)
+
+        # Pay 200,000 on this specific sale
+        pay_res = self.client.post('/api/organization-tabs/pay-debt/', {
+            'client_id': self.org.id,
+            'sale_id': sale.id,
+            'amount': 200000.0,
+            'payment_method': 'BANK_TRANSFER',
+            'note': 'To`lov topshirig`i #415'
+        }, format='json')
+        self.assertEqual(pay_res.status_code, status.HTTP_200_OK)
+
+        sale.refresh_from_db()
+        self.assertEqual(float(sale.paid_amount), 200000.0)
+        self.assertEqual(float(sale.debt_amount), 200000.0)
+
+        # Check ClientTransaction created
+        tx = ClientTransaction.objects.filter(client=self.org, sale=sale).first()
+        self.assertIsNotNone(tx)
+        self.assertEqual(float(tx.amount), 200000.0)
+        self.assertIsNotNone(tx.cashflow)
+        self.assertEqual(tx.cashflow.transaction_type, 'INCOME')
+
+        # Check that worker's realized earnings unlocked immediately!
+        # ratio is 200,000 / 400,000 = 50%, so realized should now be 50,000!
+        w_tab_after = self.client.get(f'/api/worker-tabs/{self.worker1.id}/')
+        self.assertEqual(w_tab_after.data['summary']['paid_service_earned'], 50000.0)
+        self.assertEqual(w_tab_after.data['summary']['unpaid_company_debt_service'], 50000.0)
+
+    def test_fifo_bulk_debt_payment_and_surplus(self):
+        # Create 2 sales with debts
+        sale1 = Sale.objects.create(
+            user=self.cashier, client=self.org, total_amount=100000.0, paid_amount=0.0, debt_amount=100000.0
+        )
+        sale2 = Sale.objects.create(
+            user=self.cashier, client=self.org, total_amount=150000.0, paid_amount=0.0, debt_amount=150000.0
+        )
+
+        # Pay 300,000 in bulk (Sale 1 needs 100k, Sale 2 needs 150k, surplus 50k should go to deposit!)
+        pay_res = self.client.post('/api/organization-tabs/pay-debt/', {
+            'client_id': self.org.id,
+            'amount': 300000.0,
+            'payment_method': 'BANK_TRANSFER',
+            'note': 'Bulk payment'
+        }, format='json')
+        self.assertEqual(pay_res.status_code, status.HTTP_200_OK)
+
+        sale1.refresh_from_db()
+        sale2.refresh_from_db()
+        self.org.refresh_from_db()
+
+        self.assertEqual(float(sale1.paid_amount), 100000.0)
+        self.assertEqual(float(sale1.debt_amount), 0.0)
+        self.assertEqual(float(sale2.paid_amount), 150000.0)
+        self.assertEqual(float(sale2.debt_amount), 0.0)
+        self.assertEqual(float(self.org.credit_deposit_balance), 50000.0)
+
+    def test_deposit_use_payment_does_not_create_cashflow(self):
+        self.org.credit_deposit_balance = Decimal('100000.00')
+        self.org.save()
+
+        sale = Sale.objects.create(
+            user=self.cashier, client=self.org, total_amount=80000.0, paid_amount=0.0, debt_amount=80000.0
+        )
+
+        # Settle sale using existing deposit
+        pay_res = self.client.post('/api/organization-tabs/pay-debt/', {
+            'client_id': self.org.id,
+            'sale_id': sale.id,
+            'amount': 80000.0,
+            'payment_method': 'DEPOSIT_USE',
+            'note': 'Depozitdan hisobga olindi'
+        }, format='json')
+        self.assertEqual(pay_res.status_code, status.HTTP_200_OK)
+
+        self.org.refresh_from_db()
+        sale.refresh_from_db()
+        self.assertEqual(float(self.org.credit_deposit_balance), 20000.0)
+        self.assertEqual(float(sale.paid_amount), 80000.0)
+        self.assertEqual(float(sale.debt_amount), 0.0)
+
+        # Check transaction created and cashflow is None
+        tx = ClientTransaction.objects.filter(client=self.org, payment_method='DEPOSIT_USE').first()
+        self.assertIsNotNone(tx)
+        self.assertIsNone(tx.cashflow)
+
+
+class AddServiceWithoutSaleTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(phone_number='+998901112233', username='admin_svc', role='ADMIN', password='password123')
+        self.worker = User.objects.create_user(phone_number='+998909998877', username='mechanic_ali', role='WORKER', first_name='Ali', job='Motorist', password='password123')
+        self.client_entity = Client.objects.create(name='Umar aka', phone_number='+998901234567')
+        self.client.force_authenticate(user=self.user)
+        self.shift = Shift.objects.create(user=self.user, status='OPEN')
+
+    def test_add_service_paid_cash(self):
+        res = self.client.post('/api/worker-tabs/add-service/', {
+            'worker_id': self.worker.id,
+            'amount': 150000.0,
+            'service_name': "Moy almashtirish",
+            'car_plate': "01A777AA",
+            'payment_status': 'PAID',
+            'payment_method': 'CASH',
+            'note': "Tezkor xizmat"
+        }, format='json')
+
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        sale_id = res.data['sale_id']
+        service_id = res.data['service_id']
+
+        sale = Sale.objects.get(id=sale_id)
+        self.assertEqual(float(sale.total_amount), 150000.0)
+        self.assertEqual(float(sale.paid_amount), 150000.0)
+        self.assertEqual(float(sale.debt_amount), 0.0)
+
+        svc = SaleService.objects.get(id=service_id)
+        self.assertEqual(svc.worker, self.worker)
+        self.assertEqual(svc.service_name, "Moy almashtirish")
+        self.assertEqual(float(svc.amount), 150000.0)
+
+        # Verify CashFlow
+        cf = CashFlow.objects.filter(sale=sale, transaction_type='INCOME', category='SALE').first()
+        self.assertIsNotNone(cf)
+        self.assertEqual(float(cf.amount), 150000.0)
+
+        # Verify Worker Tab calculates this immediately
+        tab_res = self.client.get(f'/api/worker-tabs/{self.worker.id}/')
+        self.assertEqual(tab_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(float(tab_res.data['summary']['total_service_earned']), 150000.0)
+        self.assertEqual(float(tab_res.data['summary']['paid_service_earned']), 150000.0)
+        self.assertEqual(float(tab_res.data['summary']['net_balance_payable_now']), 150000.0)
+        self.assertEqual(len(tab_res.data['services']), 1)
+
+    def test_add_service_unpaid_client_debt(self):
+        res = self.client.post('/api/worker-tabs/add-service/', {
+            'worker_id': self.worker.id,
+            'amount': 200000.0,
+            'client_id': self.client_entity.id,
+            'service_name': "Xodovoy qismini ta'mirlash",
+            'payment_status': 'UNPAID',
+            'note': "Keyinroq to'laydi"
+        }, format='json')
+
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        sale_id = res.data['sale_id']
+
+        sale = Sale.objects.get(id=sale_id)
+        self.assertEqual(float(sale.total_amount), 200000.0)
+        self.assertEqual(float(sale.paid_amount), 0.0)
+        self.assertEqual(float(sale.debt_amount), 200000.0)
+
+        debt = Debt.objects.filter(sale=sale).first()
+        self.assertIsNotNone(debt)
+        self.assertEqual(float(debt.amount), 200000.0)
+
+        # Worker commission should be in Pending / unpaid_company_debt_service
+        tab_res = self.client.get(f'/api/worker-tabs/{self.worker.id}/')
+        self.assertEqual(float(tab_res.data['summary']['total_service_earned']), 200000.0)
+        self.assertEqual(float(tab_res.data['summary']['paid_service_earned']), 0.0)
+        self.assertEqual(float(tab_res.data['summary']['unpaid_company_debt_service']), 200000.0)
+        self.assertEqual(float(tab_res.data['summary']['net_balance_payable_now']), 0.0)
+
+    def test_delete_service(self):
+        add_res = self.client.post('/api/worker-tabs/add-service/', {
+            'worker_id': self.worker.id,
+            'amount': 75000.0,
+            'service_name': "Diagnostika",
+            'payment_status': 'PAID',
+            'payment_method': 'CASH'
+        }, format='json')
+        sale_id = add_res.data['sale_id']
+
+        del_res = self.client.post('/api/worker-tabs/delete-service/', {
+            'sale_id': sale_id
+        }, format='json')
+        self.assertEqual(del_res.status_code, status.HTTP_200_OK)
+
+        self.assertFalse(Sale.objects.filter(id=sale_id).exists())
+        self.assertFalse(SaleService.objects.filter(sale_id=sale_id).exists())
+        self.assertFalse(CashFlow.objects.filter(sale_id=sale_id).exists())
+
+
+class FractionalQuantitySaleRoundingTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username='cashier_round', phone_number='+998901234567', password='password123', role='ADMIN')
+        self.client.force_authenticate(user=self.user)
+
+        self.oil = Product.objects.create(name="ENOC PROTECT ultra 10/40 (litr)", selling_price=80000.0)
+        Inventory.objects.create(product=self.oil, location='STORE', quantity=100.0)
+
+        self.filter_prod = Product.objects.create(name="Moy filtr WULSGEN", selling_price=20000.0)
+        Inventory.objects.create(product=self.filter_prod, location='STORE', quantity=50.0)
+
+        self.cash_method = PaymentMethod.objects.create(name="Naqd")
+
+    def test_fractional_quantity_with_exact_line_total(self):
+        """
+        Selling 2.7L of oil with a rounded price of 81481.48 and line total 220,000 SO'M
+        plus a 20,000 SO'M filter must yield exact 240,000 SO'M total, without .996 precision bug.
+        """
+        payload = {
+            'total_amount': 240000.0,
+            'paid_amount': 240000.0,
+            'debt_amount': 0.0,
+            'payment_type': self.cash_method.id,
+            'payments': [{'method': self.cash_method.id, 'amount': 240000.0}],
+            'items': [
+                {
+                    'product': self.oil.id,
+                    'quantity': 2.7,
+                    'price': 81481.48,
+                    'total': 220000.0
+                },
+                {
+                    'product': self.filter_prod.id,
+                    'quantity': 1.0,
+                    'price': 20000.0,
+                    'total': 20000.0
+                }
+            ],
+            'services': []
+        }
+
+        res = self.client.post('/api/sales/', payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        sale_id = res.data['id']
+
+        sale = Sale.objects.get(id=sale_id)
+        self.assertEqual(float(sale.total_amount), 240000.0)
+        self.assertEqual(float(sale.paid_amount), 240000.0)
+        self.assertEqual(float(sale.debt_amount), 0.0)
+
+        oil_item = sale.items.get(product=self.oil)
+        self.assertEqual(float(oil_item.quantity), 2.7)
+        self.assertEqual(float(oil_item.total), 220000.0)
+
+        filter_item = sale.items.get(product=self.filter_prod)
+        self.assertEqual(float(filter_item.quantity), 1.0)
+        self.assertEqual(float(filter_item.total), 20000.0)
+
+    def test_sale_update_with_fractional_quantity(self):
+        sale = Sale.objects.create(
+            user=self.user,
+            total_amount=100000.0,
+            paid_amount=100000.0,
+            debt_amount=0.0
+        )
+        update_payload = {
+            'total_amount': 220000.0,
+            'paid_amount': 220000.0,
+            'debt_amount': 0.0,
+            'items': [
+                {
+                    'product': self.oil.id,
+                    'quantity': 2.7,
+                    'price': 81481.48,
+                    'total': 220000.0
+                }
+            ]
+        }
+        res = self.client.patch(f'/api/sales/{sale.id}/', update_payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        sale.refresh_from_db()
+        self.assertEqual(float(sale.total_amount), 220000.0)
+        oil_item = sale.items.get(product=self.oil)
+        self.assertEqual(float(oil_item.total), 220000.0)
+
+
+
+
 
 
 

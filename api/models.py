@@ -1,3 +1,4 @@
+from decimal import Decimal
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 from simple_history.models import HistoricalRecords
@@ -210,7 +211,9 @@ class Client(TimeStampedModel):
     name = models.CharField(max_length=255, verbose_name="Client Name (Nomi)")
     is_company = models.BooleanField(default=False, verbose_name="Is Company? (Tashkilotmi?)")
     phone_number = models.CharField(max_length=20, blank=True, null=True, verbose_name="Phone Number (Tel raqam)")
+    inn = models.CharField(max_length=20, blank=True, null=True, verbose_name="INN / STIR")
     account_number = models.CharField(max_length=50, blank=True, null=True, verbose_name="Account Number (Hisob raqam)")
+    credit_deposit_balance = models.DecimalField(max_digits=15, decimal_places=2, default=0.00, verbose_name="Credit Deposit Balance (Depozit / Avans)")
     worker = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='client_profile', verbose_name="Linked Worker (Bog'langan usta)")
     history = HistoricalRecords()
     
@@ -405,15 +408,25 @@ class WorkerTransaction(TimeStampedModel):
         ('BONUS', "Bonus / Rag'batlantirish (Bonus)"),
         ('WORKER_PAYMENT', "Ustadan to'lov / Qarz qaytarish (Worker Payment)"),
     )
+    CATEGORY_CHOICES = (
+        ('GENERAL', "Umumiy (General)"),
+        ('CASH_ADVANCE', "Avans / Naqd qarz (Cash Advance)"),
+        ('TOOL_FEE', "Ijara / Podyomnik to'lovi (Tool / Lift Fee)"),
+        ('SPARE_PARTS', "Ehtiyot qismlar / Zapchast (Spare Parts)"),
+    )
     PAYMENT_METHOD_CHOICES = (
         ('NONE', "Ichki hisob-kitob / Ushlanma (Internal Ledger)"),
         ('CASH', "Naqd (Cash)"),
         ('CARD', "Plastik karta (Card)"),
         ('TRANSFER', "Hisob raqam / O'tkazma (Bank Transfer)"),
+        ('SALARY_DEDUCTION', "Oylikdan ushlab qolish (Salary Deduction)"),
     )
 
     worker = models.ForeignKey(User, on_delete=models.CASCADE, related_name='tab_entries', verbose_name="Worker (Usta)")
     transaction_type = models.CharField(max_length=30, choices=TRANSACTION_TYPES, verbose_name="Transaction Type (Turi)")
+    category = models.CharField(max_length=30, choices=CATEGORY_CHOICES, default='GENERAL', verbose_name="Category (Kategoriya)")
+    related_debt = models.ForeignKey('self', null=True, blank=True, on_delete=models.SET_NULL, related_name='repayments', verbose_name="Related Debt")
+    related_sale = models.ForeignKey('Sale', null=True, blank=True, on_delete=models.SET_NULL, related_name='worker_repayments', verbose_name="Related Sale")
     amount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00, verbose_name="Amount (Summa)")
     period_month = models.CharField(max_length=7, blank=True, null=True, verbose_name="Period Month (YYYY-MM)")
     payment_method = models.CharField(max_length=20, choices=PAYMENT_METHOD_CHOICES, default='NONE', verbose_name="Payment Method (To'lov usuli)")
@@ -430,6 +443,62 @@ class WorkerTransaction(TimeStampedModel):
 
     def __str__(self):
         return f"{self.worker} - {self.get_transaction_type_display()} ({self.amount})"
+
+    @property
+    def paid_amount(self):
+        if self.transaction_type in ('WORKER_DEBT', 'TOOL_FEE'):
+            total = self.repayments.filter(transaction_type='WORKER_PAYMENT').aggregate(s=models.Sum('amount'))['s']
+            return total or Decimal('0.00')
+        return Decimal('0.00')
+
+    @property
+    def remaining_amount(self):
+        if self.transaction_type in ('WORKER_DEBT', 'TOOL_FEE'):
+            amt = Decimal(str(self.amount or 0))
+            rem = amt - self.paid_amount
+            return max(Decimal('0.00'), rem)
+        return Decimal('0.00')
+
+    def delete(self, *args, **kwargs):
+        if self.cashflow:
+            try:
+                self.cashflow.delete()
+            except Exception:
+                pass
+        return super().delete(*args, **kwargs)
+
+
+class ClientTransaction(TimeStampedModel):
+    TRANSACTION_TYPES = (
+        ('PAYMENT', "Qarz to'lovi (Debt Payment)"),
+        ('DEPOSIT', "Depozit / Avans (Deposit)"),
+        ('REFUND', "Qaytarish (Refund)"),
+    )
+    PAYMENT_METHODS = (
+        ('BANK_TRANSFER', "Bank o'tkazmasi (Perechisleniye)"),
+        ('CASH', "Naqd (Cash)"),
+        ('CARD', "Plastik karta (Card)"),
+        ('DEPOSIT_USE', "Depozitdan hisobga olish (Deposit Use)"),
+    )
+
+    client = models.ForeignKey(Client, on_delete=models.CASCADE, related_name='client_transactions', verbose_name="Client (Tashkilot)")
+    sale = models.ForeignKey('Sale', on_delete=models.SET_NULL, null=True, blank=True, related_name='client_payments', verbose_name="Related Sale (Faktura / Sotuv)")
+    transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES, default='PAYMENT', verbose_name="Transaction Type")
+    amount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00, verbose_name="Amount (Summa)")
+    payment_method = models.CharField(max_length=20, choices=PAYMENT_METHODS, default='BANK_TRANSFER', verbose_name="Payment Method")
+    shift = models.ForeignKey('Shift', on_delete=models.SET_NULL, null=True, blank=True, related_name='client_transactions', verbose_name="Shift (Smena)")
+    cashflow = models.OneToOneField('CashFlow', on_delete=models.SET_NULL, null=True, blank=True, related_name='client_transaction', verbose_name="Linked CashFlow")
+    note = models.TextField(blank=True, default='', verbose_name="Note (Izoh)")
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_client_transactions', verbose_name="Created By")
+    history = HistoricalRecords()
+
+    class Meta:
+        verbose_name = "Client Transaction"
+        verbose_name_plural = "Client Transactions"
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        return f"{self.client.name} - {self.get_transaction_type_display()} ({self.amount})"
 
     def delete(self, *args, **kwargs):
         if self.cashflow:

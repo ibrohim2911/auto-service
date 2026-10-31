@@ -103,7 +103,9 @@ const Receipt = forwardRef(({
             {cart.map((item, index) => {
               const qty = item.qty || item.quantity || 1;
               const unitPrice = parseFloat(item.selling_price || item.price || (item.total && qty ? item.total / qty : 0) || 0);
-              const lineTotal = parseFloat(item.total != null ? item.total : (unitPrice * qty));
+              const lineTotal = item.line_total != null 
+                ? Math.round(Number(item.line_total))
+                : (item.total != null ? Math.round(parseFloat(item.total)) : Math.round(unitPrice * qty));
 
               return (
                 <tr key={`item-${index}`} style={{ borderBottom: '1.5px solid #000' }}>
@@ -119,10 +121,10 @@ const Receipt = forwardRef(({
                   {!isWorker && (
                     <>
                       <td style={{ border: '1.5px solid #000', padding: '5px 3px', textAlign: 'right' }}>
-                        {unitPrice.toLocaleString()}
+                        {Number(unitPrice.toFixed(2)).toLocaleString()}
                       </td>
                       <td style={{ border: '1.5px solid #000', padding: '5px 3px', textAlign: 'right', fontWeight: 'bold' }}>
-                        {lineTotal.toLocaleString()}
+                        {Math.round(lineTotal).toLocaleString()}
                       </td>
                     </>
                   )}

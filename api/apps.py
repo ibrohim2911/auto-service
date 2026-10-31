@@ -49,6 +49,9 @@ class ApiConfig(AppConfig):
     name = 'api'
 
     def ready(self):
+        # Import signals to register receivers
+        import api.signals
+
         # Ensure functions are attached to existing connections if any
         from django.db import connections
         for conn in connections.all():

@@ -4,7 +4,8 @@ from .views import (
     UserViewSet, CategoryViewSet, UnitViewSet, PaymentMethodViewSet, ProductViewSet, InventoryViewSet,
     StockTransferViewSet, ClientViewSet, CarViewSet, ProductReceiptViewSet, ProductReceiptItemViewSet,
     SaleViewSet, SaleItemViewSet, ShiftViewSet, CashFlowViewSet, LoginView, LogoutView, DebtViewSet, DashboardStatsView,
-    PrinterSettingViewSet, CurrencySettingViewSet, SaleServiceViewSet, WorkerTransactionViewSet, WorkerTabViewSet
+    PrinterSettingViewSet, CurrencySettingViewSet, SaleServiceViewSet, WorkerTransactionViewSet, WorkerTabViewSet,
+    ClientTransactionViewSet, OrganizationTabViewSet
 )
 
 router = DefaultRouter()
@@ -24,6 +25,8 @@ router.register(r'sale-items', SaleItemViewSet)
 router.register(r'sale-services', SaleServiceViewSet)
 router.register(r'worker-transactions', WorkerTransactionViewSet)
 router.register(r'worker-tabs', WorkerTabViewSet, basename='worker-tabs')
+router.register(r'client-transactions', ClientTransactionViewSet)
+router.register(r'organization-tabs', OrganizationTabViewSet, basename='organization-tabs')
 router.register(r'shifts', ShiftViewSet)
 router.register(r'cash-flow', CashFlowViewSet)
 router.register(r'debts', DebtViewSet)

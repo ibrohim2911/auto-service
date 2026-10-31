@@ -4,7 +4,8 @@ import {
   Wrench, Users, Calendar, DollarSign, Plus, Trash2, CheckCircle2, 
   AlertCircle, Building2, Car, ChevronLeft, ChevronRight, 
   Wallet, RefreshCw, FileSpreadsheet, ArrowUpRight, ArrowDownRight,
-  Filter, Settings, Check, Clock, AlertTriangle, Layers, X, ShoppingBag, Package, Eye
+  Filter, Settings, Check, Clock, AlertTriangle, Layers, X, ShoppingBag, Package, Eye,
+  Search
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import api from '../api';
@@ -34,6 +35,7 @@ export default function WorkerTabs() {
   const [clientFilter, setClientFilter] = useState('');
   const [isCompanyFilter, setIsCompanyFilter] = useState('');
   const [paymentStatusFilter, setPaymentStatusFilter] = useState('');
+  const [tabSearch, setTabSearch] = useState('');
   const [tableSearch, setTableSearch] = useState('');
 
   // Modals
@@ -82,6 +84,26 @@ export default function WorkerTabs() {
   const [goodsPaymentForm, setGoodsPaymentForm] = useState({
     amount: '',
     payment_method: '',
+    note: ''
+  });
+
+  const [settlingDebt, setSettlingDebt] = useState(null);
+  const [settleDebtForm, setSettleDebtForm] = useState({
+    amount: '',
+    payment_method: 'CASH',
+    note: ''
+  });
+
+  const [showAddServiceModal, setShowAddServiceModal] = useState(false);
+  const [serviceForm, setServiceForm] = useState({
+    worker_id: '',
+    service_name: '',
+    amount: '',
+    client_id: '',
+    car_plate: '',
+    car_type: '',
+    payment_status: 'PAID', // 'PAID' | 'UNPAID' | 'INTERNAL'
+    payment_method: 'CASH', // 'CASH' | 'CARD' | 'BANK_TRANSFER'
     note: ''
   });
 
@@ -150,6 +172,16 @@ export default function WorkerTabs() {
   };
 
   const workersList = allWorkersData?.workers || [];
+  const filteredWorkersList = useMemo(() => {
+    if (!workersList) return [];
+    if (!tabSearch.trim()) return workersList;
+    const q = tabSearch.toLowerCase();
+    return workersList.filter(w => 
+      w.name?.toLowerCase().includes(q) ||
+      w.job?.toLowerCase().includes(q) ||
+      w.phone_number?.toLowerCase().includes(q)
+    );
+  }, [workersList, tabSearch]);
   const currentWorkerObj = workersList.find(w => String(w.id) === String(selectedWorkerId));
 
   // Mutations
@@ -228,6 +260,8 @@ export default function WorkerTabs() {
       setPayingGoodsSale(null);
       queryClient.invalidateQueries({ queryKey: ['worker-tabs'] });
       queryClient.invalidateQueries({ queryKey: ['worker-tab'] });
+      queryClient.invalidateQueries({ queryKey: ['organization-tabs'] });
+      queryClient.invalidateQueries({ queryKey: ['organization-tab'] });
       queryClient.invalidateQueries({ queryKey: ['sales'] });
       queryClient.invalidateQueries({ queryKey: ['cashflow'] });
       queryClient.invalidateQueries({ queryKey: ['shifts'] });
@@ -236,6 +270,89 @@ export default function WorkerTabs() {
       toast.error(err.response?.data?.detail || "Tovar qarzini to'lashda xatolik yuz berdi");
     }
   });
+
+  const settleDebtMutation = useMutation({
+    mutationFn: async (payload) => {
+      return api.post('worker-transactions/settle-debt/', payload);
+    },
+    onSuccess: (res) => {
+      toast.success(res.data?.detail || "Qarz muvaffaqiyatli to'landi!");
+      setSettlingDebt(null);
+      queryClient.invalidateQueries({ queryKey: ['worker-tabs'] });
+      queryClient.invalidateQueries({ queryKey: ['worker-tab'] });
+      queryClient.invalidateQueries({ queryKey: ['organization-tabs'] });
+      queryClient.invalidateQueries({ queryKey: ['organization-tab'] });
+      queryClient.invalidateQueries({ queryKey: ['sales'] });
+      queryClient.invalidateQueries({ queryKey: ['cashflow'] });
+      queryClient.invalidateQueries({ queryKey: ['shifts'] });
+    },
+    onError: (err) => {
+      toast.error(err.response?.data?.detail || "Qarzni to'lashda xatolik yuz berdi");
+    }
+  });
+
+  const addServiceMutation = useMutation({
+    mutationFn: async (payload) => {
+      return api.post('worker-tabs/add-service/', payload);
+    },
+    onSuccess: (res) => {
+      toast.success(res.data?.detail || "Xizmat haqi muvaffaqiyatli qo'shildi!");
+      setShowAddServiceModal(false);
+      queryClient.invalidateQueries({ queryKey: ['worker-tabs'] });
+      queryClient.invalidateQueries({ queryKey: ['worker-tab'] });
+      queryClient.invalidateQueries({ queryKey: ['organization-tabs'] });
+      queryClient.invalidateQueries({ queryKey: ['organization-tab'] });
+      queryClient.invalidateQueries({ queryKey: ['sales'] });
+      queryClient.invalidateQueries({ queryKey: ['cashflow'] });
+      queryClient.invalidateQueries({ queryKey: ['shifts'] });
+    },
+    onError: (err) => {
+      toast.error(err.response?.data?.detail || "Xizmat haqini qo'shishda xatolik yuz berdi");
+    }
+  });
+
+  const deleteServiceMutation = useMutation({
+    mutationFn: async (payload) => {
+      return api.post('worker-tabs/delete-service/', payload);
+    },
+    onSuccess: (res) => {
+      toast.success(res.data?.detail || "Xizmat haqi muvaffaqiyatli o'chirildi!");
+      queryClient.invalidateQueries({ queryKey: ['worker-tabs'] });
+      queryClient.invalidateQueries({ queryKey: ['worker-tab'] });
+      queryClient.invalidateQueries({ queryKey: ['organization-tabs'] });
+      queryClient.invalidateQueries({ queryKey: ['organization-tab'] });
+      queryClient.invalidateQueries({ queryKey: ['sales'] });
+      queryClient.invalidateQueries({ queryKey: ['cashflow'] });
+      queryClient.invalidateQueries({ queryKey: ['shifts'] });
+    },
+    onError: (err) => {
+      toast.error(err.response?.data?.detail || "Xizmatni o'chirishda xatolik yuz berdi");
+    }
+  });
+
+  const handleOpenSettleDebt = (debtItem) => {
+    setSettlingDebt(debtItem);
+    setSettleDebtForm({
+      amount: debtItem.remaining_amount || '',
+      payment_method: 'CASH',
+      note: `${debtItem.debt_type_display} yopish`
+    });
+  };
+
+  const handleSettleDebtSubmit = (e) => {
+    e.preventDefault();
+    if (!settlingDebt) return;
+    settleDebtMutation.mutate({
+      worker_id: selectedWorkerId,
+      debt_type: settlingDebt.debt_type,
+      transaction_id: settlingDebt.transaction_id,
+      sale_id: settlingDebt.sale_id,
+      amount: settleDebtForm.amount,
+      payment_method: settleDebtForm.payment_method,
+      note: settleDebtForm.note,
+      period_month: selectedMonth
+    });
+  };
 
   // Filtered Services List (in detail view)
   const filteredServices = useMemo(() => {
@@ -275,6 +392,19 @@ export default function WorkerTabs() {
       s.status_display?.toLowerCase().includes(q)
     );
   }, [singleWorkerData?.goods_sales, tableSearch]);
+
+  // Filtered Open Debts List (in detail view)
+  const filteredOpenDebts = useMemo(() => {
+    if (!singleWorkerData?.open_debts) return [];
+    if (!tableSearch.trim()) return singleWorkerData.open_debts;
+    const q = tableSearch.toLowerCase();
+    return singleWorkerData.open_debts.filter(d => 
+      d.description?.toLowerCase().includes(q) ||
+      d.debt_type_display?.toLowerCase().includes(q) ||
+      d.car_plate?.toLowerCase().includes(q) ||
+      String(d.remaining_amount).includes(q)
+    );
+  }, [singleWorkerData?.open_debts, tableSearch]);
 
   // Quick Open Modal Handlers
   const handleOpenToolFee = (workerId = null) => {
@@ -372,6 +502,50 @@ export default function WorkerTabs() {
       amount: sale.debt_amount || '',
       payment_method: paymentMethodsData?.[0]?.id || '',
       note: `Nasiya tovar qarzi to'lovi (Sotuv #${sale.sale_id || sale.id})`
+    });
+  };
+
+  const handleOpenAddService = (workerId = null) => {
+    const targetId = workerId || (selectedWorkerId !== 'all' ? selectedWorkerId : (workersList[0]?.id || ''));
+    setServiceForm({
+      worker_id: targetId,
+      service_name: '',
+      amount: '',
+      client_id: '',
+      car_plate: '',
+      car_type: '',
+      payment_status: 'PAID',
+      payment_method: 'CASH',
+      note: ''
+    });
+    setShowAddServiceModal(true);
+  };
+
+  const handleServiceSubmit = (e) => {
+    e.preventDefault();
+    if (!serviceForm.worker_id) {
+      toast.error("Ustani tanlang!");
+      return;
+    }
+    if (!serviceForm.amount || parseFloat(serviceForm.amount) <= 0) {
+      toast.error("Xizmat summasini to'g'ri kiriting!");
+      return;
+    }
+    if (serviceForm.payment_status === 'UNPAID' && !serviceForm.client_id) {
+      toast.error("Nasiya (qarz) holatida mijoz yoki tashkilotni tanlash shart!");
+      return;
+    }
+
+    addServiceMutation.mutate({
+      worker_id: serviceForm.worker_id,
+      service_name: serviceForm.service_name || "Xizmat haqi",
+      amount: parseFloat(serviceForm.amount),
+      client_id: serviceForm.client_id || null,
+      car_plate: serviceForm.car_plate || '',
+      car_type: serviceForm.car_type || '',
+      payment_status: serviceForm.payment_status,
+      payment_method: serviceForm.payment_method,
+      note: serviceForm.note || ''
     });
   };
 
@@ -536,6 +710,29 @@ export default function WorkerTabs() {
           </button>
 
           <button
+            onClick={() => handleOpenAddService()}
+            className="btn"
+            style={{
+              padding: '0 16px',
+              height: '40px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              fontSize: '0.88rem',
+              backgroundColor: 'var(--primary)',
+              color: '#fff',
+              fontWeight: 700,
+              borderRadius: '10px',
+              border: 'none',
+              cursor: 'pointer',
+              boxShadow: '0 4px 12px rgba(99, 102, 241, 0.25)'
+            }}
+          >
+            <Wrench size={16} />
+            <span>+ Xizmat haqi yozish</span>
+          </button>
+
+          <button
             onClick={() => handleOpenPayout()}
             className="btn btn-primary"
             style={{
@@ -617,7 +814,8 @@ export default function WorkerTabs() {
             cursor: 'pointer',
             whiteSpace: 'nowrap',
             boxShadow: selectedWorkerId === 'all' ? '0 4px 14px rgba(99, 102, 241, 0.3)' : 'var(--shadow-sm)',
-            transition: 'all 0.2s ease'
+            transition: 'all 0.2s ease',
+            flexShrink: 0
           }}
         >
           <FileSpreadsheet size={16} />
@@ -629,12 +827,61 @@ export default function WorkerTabs() {
             backgroundColor: selectedWorkerId === 'all' ? 'rgba(255,255,255,0.25)' : 'var(--surface-hover)',
             color: selectedWorkerId === 'all' ? '#ffffff' : 'var(--text-muted)'
           }}>
-            {workersList.length}
+            {tabSearch ? `${filteredWorkersList.length}/${workersList.length}` : workersList.length}
           </span>
         </button>
 
+        {/* Tab Search Input */}
+        <div style={{
+          position: 'relative',
+          display: 'flex',
+          alignItems: 'center',
+          minWidth: '170px',
+          maxWidth: '220px',
+          flexShrink: 0
+        }}>
+          <Search size={15} style={{ position: 'absolute', left: '10px', color: 'var(--text-muted)', pointerEvents: 'none' }} />
+          <input
+            type="text"
+            placeholder="Usta izlash..."
+            value={tabSearch}
+            onChange={e => setTabSearch(e.target.value)}
+            style={{
+              width: '100%',
+              height: '38px',
+              padding: '0 28px 0 32px',
+              borderRadius: '12px',
+              border: tabSearch ? '1px solid var(--primary)' : '1px solid var(--border)',
+              backgroundColor: 'var(--surface)',
+              color: 'var(--text-main)',
+              fontSize: '0.82rem',
+              outline: 'none',
+              transition: 'all 0.2s'
+            }}
+          />
+          {tabSearch && (
+            <button
+              onClick={() => setTabSearch('')}
+              style={{
+                position: 'absolute',
+                right: '8px',
+                background: 'none',
+                border: 'none',
+                color: 'var(--text-muted)',
+                cursor: 'pointer',
+                padding: '2px',
+                display: 'flex',
+                alignItems: 'center'
+              }}
+              title="Tozalash"
+            >
+              <X size={14} />
+            </button>
+          )}
+        </div>
+
         {/* Individual Worker Tabs */}
-        {workersList.map(w => {
+        {filteredWorkersList.map(w => {
           const isSelected = String(selectedWorkerId) === String(w.id);
           const hasPendingDebt = w.unpaid_company_debt_service > 0;
           const payableBalance = w.net_balance_payable_now;
@@ -658,7 +905,8 @@ export default function WorkerTabs() {
                 whiteSpace: 'nowrap',
                 position: 'relative',
                 boxShadow: isSelected ? '0 0 0 2px rgba(99, 102, 241, 0.2)' : 'var(--shadow-sm)',
-                transition: 'all 0.2s ease'
+                transition: 'all 0.2s ease',
+                flexShrink: 0
               }}
             >
               <div style={{
@@ -718,6 +966,12 @@ export default function WorkerTabs() {
             </button>
           );
         })}
+
+        {filteredWorkersList.length === 0 && (
+          <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', padding: '0 12px', whiteSpace: 'nowrap' }}>
+            Usta topilmadi
+          </span>
+        )}
       </div>
 
       {/* 3. MAIN CONTENT: CONDITIONAL (ALL WORKERS COMPARISON vs SINGLE WORKER TAB) */}
@@ -821,6 +1075,56 @@ export default function WorkerTabs() {
               </div>
               <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: '8px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 Jami hisoblangan: {formatMoney(workersList.reduce((sum, w) => sum + (w.net_balance_total || 0), 0))}
+              </div>
+            </div>
+          </div>
+
+          {/* Search bar for comparison table */}
+          <div className="card" style={{ padding: '14px 18px', marginBottom: '16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+              <div style={{ position: 'relative', width: '380px', maxWidth: '100%' }}>
+                <Search size={16} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', pointerEvents: 'none' }} />
+                <input
+                  type="text"
+                  placeholder="Usta ismi, mutaxassisligi (kasbi) yoki telefon raqami bo'yicha izlash..."
+                  value={tabSearch}
+                  onChange={e => setTabSearch(e.target.value)}
+                  style={{
+                    width: '100%',
+                    height: '38px',
+                    padding: '0 32px 0 36px',
+                    borderRadius: '8px',
+                    border: '1px solid var(--border)',
+                    backgroundColor: 'var(--surface)',
+                    color: 'var(--text-main)',
+                    fontSize: '0.85rem',
+                    outline: 'none'
+                  }}
+                />
+                {tabSearch && (
+                  <button
+                    onClick={() => setTabSearch('')}
+                    style={{
+                      position: 'absolute',
+                      right: '10px',
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--text-muted)',
+                      cursor: 'pointer',
+                      padding: '2px',
+                      display: 'flex',
+                      alignItems: 'center'
+                    }}
+                    title="Tozalash"
+                  >
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+              <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+                Ko'rsatilmoqda: <b>{filteredWorkersList.length}</b> / {workersList.length} ta usta
               </div>
             </div>
           </div>
@@ -962,14 +1266,14 @@ export default function WorkerTabs() {
                         Yuklanmoqda...
                       </td>
                     </tr>
-                  ) : workersList.length === 0 ? (
+                  ) : filteredWorkersList.length === 0 ? (
                     <tr>
                       <td colSpan="10" style={{ textAlign: 'center', padding: '36px', color: 'var(--text-muted)' }}>
-                        Faol ustalar topilmadi.
+                        {tabSearch ? `"${tabSearch}" bo'yicha usta topilmadi.` : "Faol ustalar topilmadi."}
                       </td>
                     </tr>
                   ) : (
-                    workersList.map(w => {
+                    filteredWorkersList.map(w => {
                       const payable = w.net_balance_payable_now;
                       const hasToolFee = w.total_tool_fees > 0;
 
@@ -1024,6 +1328,11 @@ export default function WorkerTabs() {
                               <div style={{ whiteSpace: 'nowrap' }}>
                                 {hasToolFee ? formatMoney(w.total_tool_fees) : <span style={{ color: 'var(--text-muted)' }}>—</span>}
                               </div>
+                              {Number(w.tool_fee_balance || 0) > 0 && (
+                                <div style={{ fontSize: '0.72rem', color: '#8b5cf6', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                                  Qoldiq: {formatMoney(w.tool_fee_balance)}
+                                </div>
+                              )}
                               {hasToolFee && (
                                 <button
                                   type="button"
@@ -1060,6 +1369,11 @@ export default function WorkerTabs() {
                               <div style={{ whiteSpace: 'nowrap' }}>
                                 {w.total_worker_debts > 0 ? formatMoney(w.total_worker_debts) : <span style={{ color: 'var(--text-muted)' }}>—</span>}
                               </div>
+                              {Number(w.cash_advance_balance || 0) > 0 && (
+                                <div style={{ fontSize: '0.72rem', color: 'var(--danger)', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                                  Qoldiq: {formatMoney(w.cash_advance_balance)}
+                                </div>
+                              )}
                               {w.total_worker_debts > 0 && (
                                 <button
                                   type="button"
@@ -1096,12 +1410,12 @@ export default function WorkerTabs() {
                             </div>
                           </td>
 
-                          <td style={{ padding: '12px 14px', textAlign: 'right', color: (w.total_goods_debt || 0) > 0 ? '#ec4899' : 'var(--text-muted)', fontWeight: (w.total_goods_debt || 0) > 0 ? 700 : 500, verticalAlign: 'top' }}>
+                          <td style={{ padding: '12px 14px', textAlign: 'right', color: (w.goods_debt_balance || w.total_goods_debt || 0) > 0 ? '#ec4899' : 'var(--text-muted)', fontWeight: (w.goods_debt_balance || w.total_goods_debt || 0) > 0 ? 700 : 500, verticalAlign: 'top' }}>
                             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
                               <div style={{ whiteSpace: 'nowrap' }}>
-                                {(w.total_goods_debt || 0) > 0 ? formatMoney(w.total_goods_debt) : <span style={{ color: 'var(--text-muted)' }}>—</span>}
+                                {(w.goods_debt_balance || w.total_goods_debt || 0) > 0 ? formatMoney(w.goods_debt_balance || w.total_goods_debt) : <span style={{ color: 'var(--text-muted)' }}>—</span>}
                               </div>
-                              {(w.total_goods_debt || 0) > 0 && (
+                              {(w.goods_debt_balance || w.total_goods_debt || 0) > 0 && (
                                 <button
                                   type="button"
                                   onClick={(e) => {
@@ -1153,8 +1467,60 @@ export default function WorkerTabs() {
                             </div>
                           </td>
 
-                          <td style={{ padding: '12px 14px', textAlign: 'center', verticalAlign: 'top', minWidth: '270px' }} onClick={e => e.stopPropagation()}>
+                          <td style={{ padding: '12px 14px', textAlign: 'center', verticalAlign: 'top', minWidth: '320px' }} onClick={e => e.stopPropagation()}>
                             <div style={{ display: 'flex', gap: '6px', justifyContent: 'center', alignItems: 'center', flexWrap: 'nowrap' }}>
+                              {(Number(w.total_unpaid_debt || 0) > 0) && (
+                                <button
+                                  onClick={() => {
+                                    setSelectedWorkerId(w.id);
+                                    setActiveSubTab('open_debts');
+                                  }}
+                                  className="btn"
+                                  style={{
+                                    height: '28px',
+                                    padding: '0 8px',
+                                    fontSize: '0.74rem',
+                                    backgroundColor: 'rgba(245, 158, 11, 0.15)',
+                                    color: '#d97706',
+                                    border: '1px solid rgba(245, 158, 11, 0.35)',
+                                    fontWeight: 700,
+                                    borderRadius: '6px',
+                                    cursor: 'pointer',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '3px',
+                                    whiteSpace: 'nowrap'
+                                  }}
+                                  title="Ushbu ustaning ochiq qarzlarini ko'rish va yopish"
+                                >
+                                  <AlertCircle size={12} /> Qarz ({w.open_debts_count || '!'})
+                                </button>
+                              )}
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleOpenAddService(w.id);
+                                }}
+                                className="btn"
+                                style={{
+                                  height: '28px',
+                                  padding: '0 8px',
+                                  fontSize: '0.74rem',
+                                  backgroundColor: 'rgba(99, 102, 241, 0.12)',
+                                  color: 'var(--primary)',
+                                  border: '1px solid rgba(99, 102, 241, 0.3)',
+                                  fontWeight: 700,
+                                  borderRadius: '6px',
+                                  cursor: 'pointer',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '3px',
+                                  whiteSpace: 'nowrap'
+                                }}
+                                title="Ushbu ustaga yangi xizmat haqi yozish"
+                              >
+                                <Wrench size={11} /> + Xizmat
+                              </button>
                               <button
                                 onClick={() => setSelectedWorkerId(w.id)}
                                 className="btn btn-secondary"
@@ -1254,6 +1620,77 @@ export default function WorkerTabs() {
                 <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '2px' }}>
                   Tel: {singleWorkerData?.worker?.phone_number || currentWorkerObj?.phone_number || '—'} • Oylik podyomnik normasi: {formatMoney(singleWorkerData?.worker?.monthly_tool_fee || currentWorkerObj?.monthly_tool_fee || 0)}
                 </div>
+                
+                {/* 3 Distinct Debt Badges */}
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '6px' }}>
+                  <span style={{
+                    fontSize: '0.74rem',
+                    fontWeight: 700,
+                    padding: '2px 8px',
+                    borderRadius: '8px',
+                    backgroundColor: (singleWorkerData?.summary?.cash_advance_balance || 0) > 0 ? 'rgba(239, 68, 68, 0.12)' : 'var(--surface-hover)',
+                    color: (singleWorkerData?.summary?.cash_advance_balance || 0) > 0 ? 'var(--danger)' : 'var(--text-muted)',
+                    border: '1px solid ' + ((singleWorkerData?.summary?.cash_advance_balance || 0) > 0 ? 'rgba(239, 68, 68, 0.3)' : 'var(--border)'),
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px'
+                  }}>
+                    <Wallet size={12} /> Avans qarzi: {formatMoney(singleWorkerData?.summary?.cash_advance_balance || 0)}
+                  </span>
+
+                  <span style={{
+                    fontSize: '0.74rem',
+                    fontWeight: 700,
+                    padding: '2px 8px',
+                    borderRadius: '8px',
+                    backgroundColor: (singleWorkerData?.summary?.tool_fee_balance || 0) > 0 ? 'rgba(139, 92, 246, 0.12)' : 'var(--surface-hover)',
+                    color: (singleWorkerData?.summary?.tool_fee_balance || 0) > 0 ? '#8b5cf6' : 'var(--text-muted)',
+                    border: '1px solid ' + ((singleWorkerData?.summary?.tool_fee_balance || 0) > 0 ? 'rgba(139, 92, 246, 0.3)' : 'var(--border)'),
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px'
+                  }}>
+                    <Layers size={12} /> Ijara/Asbob qarzi: {formatMoney(singleWorkerData?.summary?.tool_fee_balance || 0)}
+                  </span>
+
+                  <span style={{
+                    fontSize: '0.74rem',
+                    fontWeight: 700,
+                    padding: '2px 8px',
+                    borderRadius: '8px',
+                    backgroundColor: (singleWorkerData?.summary?.goods_debt_balance || 0) > 0 ? 'rgba(236, 72, 153, 0.12)' : 'var(--surface-hover)',
+                    color: (singleWorkerData?.summary?.goods_debt_balance || 0) > 0 ? '#ec4899' : 'var(--text-muted)',
+                    border: '1px solid ' + ((singleWorkerData?.summary?.goods_debt_balance || 0) > 0 ? 'rgba(236, 72, 153, 0.3)' : 'var(--border)'),
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px'
+                  }}>
+                    <ShoppingBag size={12} /> Zapchast qarzi: {formatMoney(singleWorkerData?.summary?.goods_debt_balance || 0)}
+                  </span>
+
+                  {(singleWorkerData?.summary?.total_unpaid_debt || 0) > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setActiveSubTab('open_debts')}
+                      style={{
+                        fontSize: '0.74rem',
+                        fontWeight: 800,
+                        padding: '2px 9px',
+                        borderRadius: '8px',
+                        backgroundColor: 'rgba(245, 158, 11, 0.15)',
+                        color: '#d97706',
+                        border: '1px solid rgba(245, 158, 11, 0.4)',
+                        cursor: 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '4px'
+                      }}
+                      title="Ochiq qarzlarni ko'rish va to'lash"
+                    >
+                      <AlertTriangle size={12} /> Jami ochiq qarz: {formatMoney(singleWorkerData?.summary?.total_unpaid_debt || 0)} ({singleWorkerData?.open_debts?.length || 0})
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -1279,6 +1716,13 @@ export default function WorkerTabs() {
                 style={{ height: '36px', fontSize: '0.82rem', display: 'flex', alignItems: 'center', gap: '6px' }}
               >
                 <Wallet size={15} color="#f59e0b" /> Avans yozish
+              </button>
+              <button
+                onClick={() => handleOpenAddService(selectedWorkerId)}
+                className="btn btn-primary"
+                style={{ height: '36px', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 700 }}
+              >
+                <Wrench size={15} /> + Xizmat haqi
               </button>
               <button
                 onClick={() => handleOpenPayout(selectedWorkerId)}
@@ -1393,13 +1837,18 @@ export default function WorkerTabs() {
                       {formatMoney(toolFees)}
                     </div>
                     <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-                      Oylik doimiy ushlanma
+                      Oylik hisoblangan: {formatMoney(toolFees)}
                     </div>
+                    {Number(sum.tool_fee_balance || 0) > 0 ? (
+                      <div style={{ fontSize: '0.74rem', color: '#8b5cf6', fontWeight: 700, marginTop: '3px' }}>
+                        To'lanmagan qoldiq: {formatMoney(sum.tool_fee_balance)}
+                      </div>
+                    ) : null}
                   </div>
-                  {toolFees > 0 ? (
+                  {Number(sum.tool_fee_balance || 0) > 0 ? (
                     <button
                       type="button"
-                      onClick={() => handlePayToolFee(selectedWorkerId, toolFees)}
+                      onClick={() => handlePayToolFee(selectedWorkerId, sum.tool_fee_balance)}
                       className="btn"
                       style={{
                         marginTop: 'auto',
@@ -1423,7 +1872,7 @@ export default function WorkerTabs() {
                     </button>
                   ) : (
                     <div style={{ marginTop: 'auto', paddingTop: '10px', height: '32px', display: 'flex', alignItems: 'center', fontSize: '0.74rem', color: 'var(--text-muted)', gap: '4px' }}>
-                      <Layers size={12} color="#8b5cf6" /> To'lov yo'q
+                      <Layers size={12} color="#8b5cf6" /> To'lov yo'q / Yopilgan
                     </div>
                   )}
                 </div>
@@ -1443,22 +1892,21 @@ export default function WorkerTabs() {
                       <Wallet size={16} color="var(--danger)" />
                     </div>
                     <div style={{ fontSize: '1.45rem', fontWeight: 800, color: 'var(--danger)' }}>
-                      {formatMoney(workerDebts)}
+                      {formatMoney(sum.cash_advance_balance || 0)}
+                    </div>
+                    <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                      Jami olingan: {formatMoney(workerDebts)}
                     </div>
                     {Number(sum.total_worker_payments || 0) > 0 ? (
-                      <div style={{ fontSize: '0.74rem', color: '#10b981', fontWeight: 700, marginTop: '4px', whiteSpace: 'nowrap' }}>
+                      <div style={{ fontSize: '0.74rem', color: '#10b981', fontWeight: 700, marginTop: '2px', whiteSpace: 'nowrap' }}>
                         Ustadan tushgan: +{formatMoney(sum.total_worker_payments)}
                       </div>
-                    ) : (
-                      <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-                        Avans va qarzlar
-                      </div>
-                    )}
+                    ) : null}
                   </div>
-                  {workerDebts > 0 ? (
+                  {Number(sum.cash_advance_balance || 0) > 0 ? (
                     <button
                       type="button"
-                      onClick={() => handlePayWorkerDebt(selectedWorkerId, workerDebts)}
+                      onClick={() => handlePayWorkerDebt(selectedWorkerId, sum.cash_advance_balance)}
                       className="btn"
                       style={{
                         marginTop: 'auto',
@@ -1503,16 +1951,16 @@ export default function WorkerTabs() {
                       <ShoppingBag size={16} color="#ec4899" />
                     </div>
                     <div style={{ fontSize: '1.45rem', fontWeight: 800, color: '#ec4899' }}>
-                      {formatMoney(sum.total_goods_debt_all_time || sum.total_goods_debt || 0)}
+                      {formatMoney(sum.goods_debt_balance || sum.total_goods_debt_all_time || 0)}
                     </div>
                     <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: '4px' }}>
                       {sum.goods_sales_count || 0} ta chek bo'yicha ehtiyot qismlar
                     </div>
                   </div>
-                  {Number(sum.total_goods_debt_all_time || sum.total_goods_debt || 0) > 0 ? (
+                  {Number(sum.goods_debt_balance || sum.total_goods_debt_all_time || 0) > 0 ? (
                     <button
                       type="button"
-                      onClick={() => setActiveSubTab('goods_debts')}
+                      onClick={() => setActiveSubTab('open_debts')}
                       className="btn"
                       style={{
                         marginTop: 'auto',
@@ -1532,7 +1980,7 @@ export default function WorkerTabs() {
                       }}
                       title="Nasiya tovar qarzini ko'rish va to'lash"
                     >
-                      <ShoppingBag size={13} /> Qarzni to'lash (Ro'yxat)
+                      <ShoppingBag size={13} /> Ochiq qarzlar ro'yxati
                     </button>
                   ) : (
                     <div style={{ marginTop: 'auto', paddingTop: '10px', height: '32px', display: 'flex', alignItems: 'center', fontSize: '0.74rem', color: 'var(--text-muted)', gap: '4px' }}>
@@ -1697,6 +2145,37 @@ export default function WorkerTabs() {
                 </button>
 
                 <button
+                  onClick={() => setActiveSubTab('open_debts')}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    padding: '8px 16px',
+                    borderRadius: '10px',
+                    border: 'none',
+                    backgroundColor: activeSubTab === 'open_debts' ? '#f59e0b' : 'var(--surface-hover)',
+                    color: activeSubTab === 'open_debts' ? '#fff' : 'var(--text-main)',
+                    fontWeight: 700,
+                    fontSize: '0.86rem',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease'
+                  }}
+                >
+                  <AlertCircle size={16} />
+                  <span>Ochiq qarzlar</span>
+                  <span style={{
+                    fontSize: '0.72rem',
+                    padding: '1px 7px',
+                    borderRadius: '10px',
+                    backgroundColor: activeSubTab === 'open_debts' ? 'rgba(255,255,255,0.25)' : ((singleWorkerData?.open_debts?.length || 0) > 0 ? 'rgba(245, 158, 11, 0.2)' : 'var(--surface)'),
+                    color: activeSubTab === 'open_debts' ? '#fff' : ((singleWorkerData?.open_debts?.length || 0) > 0 ? '#d97706' : 'var(--text-muted)'),
+                    fontWeight: 800
+                  }}>
+                    {singleWorkerData?.open_debts?.length || 0}
+                  </span>
+                </button>
+
+                <button
                   onClick={() => setActiveSubTab('goods_debts')}
                   style={{
                     display: 'flex',
@@ -1797,6 +2276,16 @@ export default function WorkerTabs() {
                   className="input-field"
                   style={{ height: '36px', width: '180px', padding: '0 10px', fontSize: '0.82rem', marginBottom: 0 }}
                 />
+
+                {activeSubTab === 'jobs' && (
+                  <button
+                    onClick={() => handleOpenAddService(selectedWorkerId)}
+                    className="btn btn-primary"
+                    style={{ height: '36px', padding: '0 12px', fontSize: '0.82rem', display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap', fontWeight: 700 }}
+                  >
+                    <Plus size={14} /> Xizmat haqi yozish
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -1818,18 +2307,19 @@ export default function WorkerTabs() {
                       <th style={{ padding: '12px 14px', fontWeight: 700, textAlign: 'right' }}>Xizmat haqi</th>
                       <th style={{ padding: '12px 14px', fontWeight: 700, textAlign: 'center' }}>Kompaniya to'lovi</th>
                       <th style={{ padding: '12px 14px', fontWeight: 700, textAlign: 'right' }}>Tushgan ulush</th>
+                      <th style={{ padding: '12px 14px', fontWeight: 700, textAlign: 'center', width: '50px' }}>Amal</th>
                     </tr>
                   </thead>
                   <tbody>
                     {isSingleLoading ? (
                       <tr>
-                        <td colSpan="9" style={{ textAlign: 'center', padding: '36px', color: 'var(--text-muted)' }}>
+                        <td colSpan="10" style={{ textAlign: 'center', padding: '36px', color: 'var(--text-muted)' }}>
                           Xizmatlar yuklanmoqda...
                         </td>
                       </tr>
                     ) : filteredServices.length === 0 ? (
                       <tr>
-                        <td colSpan="9" style={{ textAlign: 'center', padding: '36px', color: 'var(--text-muted)' }}>
+                        <td colSpan="10" style={{ textAlign: 'center', padding: '36px', color: 'var(--text-muted)' }}>
                           Belgilangan davrda ushbu usta uchun bajarilgan ishlar topilmadi.
                         </td>
                       </tr>
@@ -1944,6 +2434,210 @@ export default function WorkerTabs() {
                                   Qarzda: {formatMoney(svc.pending_amount)}
                                 </div>
                               )}
+                            </td>
+
+                            <td style={{ padding: '12px 14px', textAlign: 'center' }}>
+                              <button
+                                onClick={() => {
+                                  if (window.confirm(`Rostdan ham ushbu xizmat haqini (#${svc.sale_id}: ${svc.service_name} - ${formatMoney(svc.amount)}) o'chirmoqchimisiz?`)) {
+                                    deleteServiceMutation.mutate({ sale_id: svc.sale_id, service_id: svc.id });
+                                  }
+                                }}
+                                className="btn-icon"
+                                style={{
+                                  color: 'var(--danger)',
+                                  width: '28px',
+                                  height: '28px',
+                                  borderRadius: '6px',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  backgroundColor: 'rgba(239, 68, 68, 0.08)',
+                                  border: '1px solid rgba(239, 68, 68, 0.2)',
+                                  cursor: 'pointer'
+                                }}
+                                title="Xizmat haqini o'chirish"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : activeSubTab === 'open_debts' ? (
+            /* ================= SUB-TAB 2: OCHIQ QARZLAR (OPEN DEBTS) ================= */
+            <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+              <div style={{
+                padding: '16px 20px',
+                borderBottom: '1px solid var(--border)',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                backgroundColor: 'var(--surface)',
+                flexWrap: 'wrap',
+                gap: '12px'
+              }}>
+                <div>
+                  <div style={{ fontSize: '1rem', fontWeight: 800, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <AlertCircle size={18} color="#f59e0b" />
+                    <span>Usta bo'yicha to'lanmagan ochiq qarzlar ro'yxati</span>
+                  </div>
+                  <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                    Avanslar, podyomnik to'lovlari va do'kondan olingan ehtiyot qismlarining qoldiq qarzlari.
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: '0.82rem', padding: '4px 10px', borderRadius: '8px', backgroundColor: 'rgba(239, 68, 68, 0.1)', color: 'var(--danger)', fontWeight: 700 }}>
+                    Avans: {formatMoney(singleWorkerData?.summary?.cash_advance_balance || 0)}
+                  </span>
+                  <span style={{ fontSize: '0.82rem', padding: '4px 10px', borderRadius: '8px', backgroundColor: 'rgba(139, 92, 246, 0.1)', color: '#8b5cf6', fontWeight: 700 }}>
+                    Ijara: {formatMoney(singleWorkerData?.summary?.tool_fee_balance || 0)}
+                  </span>
+                  <span style={{ fontSize: '0.82rem', padding: '4px 10px', borderRadius: '8px', backgroundColor: 'rgba(236, 72, 153, 0.1)', color: '#ec4899', fontWeight: 700 }}>
+                    Zapchast: {formatMoney(singleWorkerData?.summary?.goods_debt_balance || 0)}
+                  </span>
+                  <span style={{ fontSize: '0.86rem', padding: '5px 12px', borderRadius: '8px', backgroundColor: '#fef3c7', color: '#b45309', fontWeight: 800, border: '1px solid #fde68a' }}>
+                    Jami: {formatMoney(singleWorkerData?.summary?.total_unpaid_debt || 0)}
+                  </span>
+                </div>
+              </div>
+
+              <div style={{ overflowX: 'auto' }}>
+                <table className="table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.86rem' }}>
+                  <thead>
+                    <tr style={{ backgroundColor: 'var(--surface-hover)', textAlign: 'left', borderBottom: '1px solid var(--border)' }}>
+                      <th style={{ padding: '12px 14px', fontWeight: 700 }}>Sana / Davr</th>
+                      <th style={{ padding: '12px 14px', fontWeight: 700 }}>Qarz turi</th>
+                      <th style={{ padding: '12px 14px', fontWeight: 700 }}>Tavsif / Mahsulotlar</th>
+                      <th style={{ padding: '12px 14px', fontWeight: 700, textAlign: 'right' }}>Boshlang'ich summa</th>
+                      <th style={{ padding: '12px 14px', fontWeight: 700, textAlign: 'right', color: '#10b981' }}>To'langan</th>
+                      <th style={{ padding: '12px 14px', fontWeight: 700, textAlign: 'right', color: 'var(--danger)' }}>Qoldiq qarz</th>
+                      <th style={{ padding: '12px 14px', fontWeight: 700, textAlign: 'center' }}>Amal</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {isSingleLoading ? (
+                      <tr>
+                        <td colSpan="7" style={{ textAlign: 'center', padding: '36px', color: 'var(--text-muted)' }}>
+                          Qarzlar yuklanmoqda...
+                        </td>
+                      </tr>
+                    ) : filteredOpenDebts.length === 0 ? (
+                      <tr>
+                        <td colSpan="7" style={{ textAlign: 'center', padding: '40px 20px' }}>
+                          <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
+                            <CheckCircle2 size={36} color="#10b981" />
+                            <div style={{ fontWeight: 700, color: 'var(--text-main)', fontSize: '0.95rem' }}>
+                              Ushbu usta bo'yicha to'lanmagan ochiq qarz yo'q!
+                            </div>
+                            <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+                              Barcha avanslar, podyomnik to'lovlari va ehtiyot qismlari to'liq yopilgan.
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredOpenDebts.map(debt => {
+                        const isAdvance = debt.debt_type === 'CASH_ADVANCE';
+                        const isToolFee = debt.debt_type === 'TOOL_FEE';
+                        const isParts = debt.debt_type === 'SPARE_PARTS';
+
+                        return (
+                          <tr key={debt.id} style={{ borderBottom: '1px solid var(--border)' }}>
+                            <td style={{ padding: '12px 14px', whiteSpace: 'nowrap', color: 'var(--text-muted)', fontSize: '0.82rem' }}>
+                              <div>{new Date(debt.date).toLocaleDateString('uz-UZ')}</div>
+                              {debt.period_month && (
+                                <div style={{ fontSize: '0.74rem', color: 'var(--primary)', fontWeight: 600 }}>
+                                  Davr: {debt.period_month}
+                                </div>
+                              )}
+                            </td>
+
+                            <td style={{ padding: '12px 14px' }}>
+                              <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                                padding: '3px 8px',
+                                borderRadius: '8px',
+                                fontSize: '0.74rem',
+                                fontWeight: 700,
+                                backgroundColor: isAdvance
+                                  ? 'rgba(239, 68, 68, 0.12)'
+                                  : isToolFee
+                                    ? 'rgba(139, 92, 246, 0.12)'
+                                    : 'rgba(236, 72, 153, 0.12)',
+                                color: isAdvance
+                                  ? 'var(--danger)'
+                                  : isToolFee
+                                    ? '#8b5cf6'
+                                    : '#ec4899'
+                              }}>
+                                {isAdvance && <Wallet size={11} />}
+                                {isToolFee && <Layers size={11} />}
+                                {isParts && <ShoppingBag size={11} />}
+                                {debt.debt_type_display}
+                              </span>
+                            </td>
+
+                            <td style={{ padding: '12px 14px' }}>
+                              <div style={{ fontWeight: 600, color: 'var(--text-main)', fontSize: '0.84rem' }}>
+                                {debt.description}
+                              </div>
+                              {debt.car_plate && (
+                                <span style={{
+                                  fontSize: '0.74rem',
+                                  border: '1px solid var(--border)',
+                                  backgroundColor: 'var(--surface-hover)',
+                                  padding: '1px 5px',
+                                  borderRadius: '4px',
+                                  fontWeight: 700,
+                                  color: 'var(--text-muted)',
+                                  display: 'inline-block',
+                                  marginTop: '2px'
+                                }}>
+                                  Avto: {debt.car_plate}
+                                </span>
+                              )}
+                            </td>
+
+                            <td style={{ padding: '12px 14px', textAlign: 'right', fontWeight: 600 }}>
+                              {formatMoney(debt.original_amount)}
+                            </td>
+
+                            <td style={{ padding: '12px 14px', textAlign: 'right', fontWeight: 600, color: '#10b981' }}>
+                              {formatMoney(debt.paid_amount)}
+                            </td>
+
+                            <td style={{ padding: '12px 14px', textAlign: 'right', fontWeight: 800, fontSize: '0.95rem', color: 'var(--danger)' }}>
+                              {formatMoney(debt.remaining_amount)}
+                            </td>
+
+                            <td style={{ padding: '12px 14px', textAlign: 'center' }}>
+                              <button
+                                type="button"
+                                onClick={() => handleOpenSettleDebt(debt)}
+                                className="btn btn-primary"
+                                style={{
+                                  height: '30px',
+                                  padding: '0 12px',
+                                  fontSize: '0.78rem',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '5px',
+                                  fontWeight: 700,
+                                  borderRadius: '8px'
+                                }}
+                                title="Ushbu qarzni yopish yoki so'ndirish"
+                              >
+                                <CheckCircle2 size={13} /> To'lash / Yopish
+                              </button>
                             </td>
                           </tr>
                         );
@@ -3214,6 +3908,536 @@ export default function WorkerTabs() {
                   disabled={payGoodsDebtMutation.isPending}
                 >
                   {payGoodsDebtMutation.isPending ? 'To\'lanmoqda...' : 'Qarzni to\'lash'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ================= MODAL 6: SETTLE OPEN DEBT (NAQD or OYLIKDAN USHLASH) ================= */}
+      {settlingDebt && (
+        <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) setSettlingDebt(null); }}>
+          <div className="modal-content" style={{ maxWidth: '520px', width: '92%', padding: '24px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <div style={{
+                  width: '34px',
+                  height: '34px',
+                  borderRadius: '10px',
+                  backgroundColor: 'rgba(16, 185, 129, 0.15)',
+                  color: '#10b981',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}>
+                  <CheckCircle2 size={18} />
+                </div>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 800 }}>
+                    Qarzni to'lash / Yopish
+                  </h3>
+                  <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                    {singleWorkerData?.worker?.name || currentWorkerObj?.name || 'Usta'}
+                  </div>
+                </div>
+              </div>
+              <button className="btn-icon" onClick={() => setSettlingDebt(null)}><X size={18} /></button>
+            </div>
+
+            {/* Debt Info Spotlight Box */}
+            <div style={{
+              backgroundColor: 'var(--surface-hover)',
+              border: '1px solid var(--border)',
+              borderRadius: '12px',
+              padding: '14px',
+              marginBottom: '18px'
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                <span style={{
+                  fontSize: '0.75rem',
+                  fontWeight: 700,
+                  padding: '2px 8px',
+                  borderRadius: '6px',
+                  backgroundColor: settlingDebt.debt_type === 'CASH_ADVANCE'
+                    ? 'rgba(239, 68, 68, 0.15)'
+                    : settlingDebt.debt_type === 'TOOL_FEE'
+                      ? 'rgba(139, 92, 246, 0.15)'
+                      : 'rgba(236, 72, 153, 0.15)',
+                  color: settlingDebt.debt_type === 'CASH_ADVANCE'
+                    ? 'var(--danger)'
+                    : settlingDebt.debt_type === 'TOOL_FEE'
+                      ? '#8b5cf6'
+                      : '#ec4899'
+                }}>
+                  {settlingDebt.debt_type_display}
+                </span>
+                <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                  Sana: {new Date(settlingDebt.date).toLocaleDateString('uz-UZ')}
+                </span>
+              </div>
+              
+              <div style={{ fontSize: '0.86rem', fontWeight: 600, color: 'var(--text-main)', marginBottom: '8px' }}>
+                {settlingDebt.description}
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', borderTop: '1px dashed var(--border)', paddingTop: '8px' }}>
+                <div>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Boshlang'ich: {formatMoney(settlingDebt.original_amount)}</div>
+                  <div style={{ fontSize: '0.72rem', color: '#10b981' }}>To'langan: {formatMoney(settlingDebt.paid_amount)}</div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Qoldiq qarz:</div>
+                  <div style={{ fontSize: '1.25rem', fontWeight: 800, color: 'var(--danger)' }}>
+                    {formatMoney(settlingDebt.remaining_amount)}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <form onSubmit={handleSettleDebtSubmit}>
+              {/* Payment Method Selector Cards */}
+              <div style={{ marginBottom: '16px' }}>
+                <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 700, marginBottom: '8px' }}>
+                  To'lov usuli (Manbasi) <span style={{ color: 'var(--danger)' }}>*</span>
+                </label>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                  {/* Option 1: Cash to shift */}
+                  <div
+                    onClick={() => setSettleDebtForm(prev => ({ ...prev, payment_method: 'CASH' }))}
+                    style={{
+                      border: settleDebtForm.payment_method === 'CASH' ? '2px solid #10b981' : '1px solid var(--border)',
+                      backgroundColor: settleDebtForm.payment_method === 'CASH' ? 'rgba(16, 185, 129, 0.08)' : 'var(--surface)',
+                      borderRadius: '10px',
+                      padding: '12px',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease'
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 700, fontSize: '0.85rem', color: settleDebtForm.payment_method === 'CASH' ? '#10b981' : 'var(--text-main)', marginBottom: '4px' }}>
+                      <Wallet size={16} /> Naqd to'lov
+                    </div>
+                    <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', lineHeight: '1.3' }}>
+                      Usta naqd pul topshiradi. Kassaga kirim bo'lib yoziladi.
+                    </div>
+                  </div>
+
+                  {/* Option 2: Salary deduction */}
+                  <div
+                    onClick={() => setSettleDebtForm(prev => ({ ...prev, payment_method: 'SALARY_DEDUCTION' }))}
+                    style={{
+                      border: settleDebtForm.payment_method === 'SALARY_DEDUCTION' ? '2px solid var(--primary)' : '1px solid var(--border)',
+                      backgroundColor: settleDebtForm.payment_method === 'SALARY_DEDUCTION' ? 'var(--primary-light)' : 'var(--surface)',
+                      borderRadius: '10px',
+                      padding: '12px',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease'
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 700, fontSize: '0.85rem', color: settleDebtForm.payment_method === 'SALARY_DEDUCTION' ? 'var(--primary)' : 'var(--text-main)', marginBottom: '4px' }}>
+                      <Layers size={16} /> Oylikdan ushlash
+                    </div>
+                    <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', lineHeight: '1.3' }}>
+                      Ishlagan maoshidan chegiriladi. Kassadagi naqd pulga tegmaydi.
+                    </div>
+                  </div>
+                </div>
+
+                {settleDebtForm.payment_method === 'SALARY_DEDUCTION' && (
+                  <div style={{
+                    marginTop: '8px',
+                    fontSize: '0.76rem',
+                    padding: '6px 10px',
+                    borderRadius: '8px',
+                    backgroundColor: 'rgba(99, 102, 241, 0.1)',
+                    color: 'var(--primary)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between'
+                  }}>
+                    <span>Hozir to'lanadigan sof oylik:</span>
+                    <strong>{formatMoney(singleWorkerData?.summary?.net_balance_payable_now || 0)}</strong>
+                  </div>
+                )}
+              </div>
+
+              {/* Amount Input */}
+              <div style={{ marginBottom: '16px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                  <label style={{ fontSize: '0.82rem', fontWeight: 700, margin: 0 }}>
+                    To'lov summasi (so'm) <span style={{ color: 'var(--danger)' }}>*</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setSettleDebtForm(prev => ({ ...prev, amount: settlingDebt.remaining_amount }))}
+                    style={{
+                      border: 'none',
+                      background: 'none',
+                      color: 'var(--primary)',
+                      fontSize: '0.75rem',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      textDecoration: 'underline'
+                    }}
+                  >
+                    To'liq yopish ({formatMoney(settlingDebt.remaining_amount)})
+                  </button>
+                </div>
+                <input
+                  type="number"
+                  required
+                  min="1"
+                  max={settlingDebt.remaining_amount}
+                  step="any"
+                  value={settleDebtForm.amount}
+                  onChange={e => setSettleDebtForm(prev => ({ ...prev, amount: e.target.value }))}
+                  placeholder="Summani kiriting..."
+                  className="input-field"
+                  style={{ width: '100%', fontSize: '1rem', fontWeight: 700 }}
+                />
+              </div>
+
+              {/* Note Input */}
+              <div style={{ marginBottom: '20px' }}>
+                <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 700, marginBottom: '6px' }}>
+                  Izoh (Ixtiyoriy)
+                </label>
+                <input
+                  type="text"
+                  value={settleDebtForm.note}
+                  onChange={e => setSettleDebtForm(prev => ({ ...prev, note: e.target.value }))}
+                  placeholder="Izoh yozing..."
+                  className="input-field"
+                  style={{ width: '100%' }}
+                />
+              </div>
+
+              {/* Shift info if CASH */}
+              {settleDebtForm.payment_method === 'CASH' && activeShift && (
+                <div style={{
+                  padding: '8px 12px',
+                  backgroundColor: 'rgba(16, 185, 129, 0.08)',
+                  border: '1px solid rgba(16, 185, 129, 0.25)',
+                  borderRadius: '8px',
+                  fontSize: '0.76rem',
+                  marginBottom: '18px',
+                  color: '#065f46'
+                }}>
+                  ✅ Faol kassa smenasi (#{activeShift.id}) mavjud. To'lov kassa kirimiga avtomatik yoziladi.
+                </div>
+              )}
+
+              {/* Buttons */}
+              <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+                <button
+                  type="button"
+                  onClick={() => setSettlingDebt(null)}
+                  className="btn btn-secondary"
+                  style={{ height: '38px', padding: '0 16px' }}
+                >
+                  Bekor qilish
+                </button>
+                <button
+                  type="submit"
+                  disabled={settleDebtMutation.isPending}
+                  className="btn btn-primary"
+                  style={{ height: '38px', padding: '0 20px', fontWeight: 700 }}
+                >
+                  {settleDebtMutation.isPending ? "Saqlanmoqda..." : "To'lovni tasdiqlash"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ================= MODAL 6: ADD SERVICE FEE (XIZMAT HAQI YOZISH) ================= */}
+      {showAddServiceModal && (
+        <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) setShowAddServiceModal(false); }}>
+          <div className="modal-content" style={{ maxWidth: '520px', width: '92%', padding: '24px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <div style={{
+                  width: '36px',
+                  height: '36px',
+                  borderRadius: '10px',
+                  backgroundColor: 'rgba(99, 102, 241, 0.12)',
+                  color: 'var(--primary)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}>
+                  <Wrench size={20} />
+                </div>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '1.2rem', fontWeight: 800 }}>+ Xizmat haqi yozish</h3>
+                  <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
+                    Sotuv qilmasdan ustaga to'g'ridan-to'g'ri ish haqi biriktirish
+                  </div>
+                </div>
+              </div>
+              <button className="btn-icon" onClick={() => setShowAddServiceModal(false)}><X size={18} /></button>
+            </div>
+
+            <form onSubmit={handleServiceSubmit}>
+              {/* Worker select */}
+              <div className="input-group" style={{ marginBottom: '14px' }}>
+                <label style={{ fontSize: '0.82rem', fontWeight: 700, marginBottom: '4px', display: 'block' }}>
+                  Usta / Mutaxassis <span style={{ color: 'var(--danger)' }}>*</span>
+                </label>
+                <select
+                  required
+                  value={serviceForm.worker_id}
+                  onChange={e => setServiceForm({ ...serviceForm, worker_id: e.target.value })}
+                  className="input-field"
+                  style={{ width: '100%', height: '38px' }}
+                >
+                  <option value="">Ustani tanlang...</option>
+                  {workersList.map(w => (
+                    <option key={w.id} value={w.id}>{w.name} ({w.job || 'Usta'})</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Service Name & Quick Suggestions */}
+              <div className="input-group" style={{ marginBottom: '14px' }}>
+                <label style={{ fontSize: '0.82rem', fontWeight: 700, marginBottom: '4px', display: 'block' }}>
+                  Xizmat nomi / Tavsifi <span style={{ color: 'var(--danger)' }}>*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="Masalan: Moy almashtirish, Xodovoy ta'mirlash..."
+                  value={serviceForm.service_name}
+                  onChange={e => setServiceForm({ ...serviceForm, service_name: e.target.value })}
+                  className="input-field"
+                  style={{ width: '100%', height: '38px', marginBottom: '6px' }}
+                />
+                {/* Quick suggestions pills */}
+                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                  {["Moy almashtirish", "Xodovoy ta'mirlash", "Diagnostika", "Konditsioner", "Elektronika", "Balansirovka / Razval", "Motor ta'miri"].map(name => (
+                    <button
+                      type="button"
+                      key={name}
+                      onClick={() => setServiceForm({ ...serviceForm, service_name: name })}
+                      style={{
+                        fontSize: '0.72rem',
+                        padding: '2px 8px',
+                        borderRadius: '6px',
+                        border: '1px solid var(--border)',
+                        backgroundColor: serviceForm.service_name === name ? 'var(--primary-light)' : 'var(--surface-hover)',
+                        color: serviceForm.service_name === name ? 'var(--primary)' : 'var(--text-muted)',
+                        cursor: 'pointer',
+                        fontWeight: serviceForm.service_name === name ? 700 : 500
+                      }}
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Amount */}
+              <div className="input-group" style={{ marginBottom: '14px' }}>
+                <label style={{ fontSize: '0.82rem', fontWeight: 700, marginBottom: '4px', display: 'block' }}>
+                  Xizmat summasi (so'm) <span style={{ color: 'var(--danger)' }}>*</span>
+                </label>
+                <input
+                  type="number"
+                  required
+                  min="1"
+                  step="any"
+                  placeholder="Masalan: 150000"
+                  value={serviceForm.amount}
+                  onChange={e => setServiceForm({ ...serviceForm, amount: e.target.value })}
+                  className="input-field"
+                  style={{ width: '100%', height: '42px', fontSize: '1.05rem', fontWeight: 800, color: 'var(--primary)' }}
+                />
+                {serviceForm.amount > 0 && (
+                  <div style={{ fontSize: '0.78rem', color: 'var(--primary)', fontWeight: 700, marginTop: '3px' }}>
+                    {formatMoney(serviceForm.amount)}
+                  </div>
+                )}
+              </div>
+
+              {/* Payment Status (Tushgan / Nasiya / Ichki) */}
+              <div style={{ marginBottom: '14px' }}>
+                <label style={{ fontSize: '0.82rem', fontWeight: 700, marginBottom: '6px', display: 'block' }}>
+                  To'lov holati <span style={{ color: 'var(--danger)' }}>*</span>
+                </label>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px' }}>
+                  {/* Paid */}
+                  <div
+                    onClick={() => setServiceForm({ ...serviceForm, payment_status: 'PAID' })}
+                    style={{
+                      border: serviceForm.payment_status === 'PAID' ? '2px solid #10b981' : '1px solid var(--border)',
+                      backgroundColor: serviceForm.payment_status === 'PAID' ? 'rgba(16, 185, 129, 0.08)' : 'var(--surface)',
+                      borderRadius: '8px',
+                      padding: '10px 8px',
+                      cursor: 'pointer',
+                      textAlign: 'center',
+                      transition: 'all 0.15s'
+                    }}
+                  >
+                    <div style={{ fontWeight: 700, fontSize: '0.82rem', color: serviceForm.payment_status === 'PAID' ? '#10b981' : 'var(--text-main)', marginBottom: '2px' }}>
+                      🟢 To'langan
+                    </div>
+                    <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>Kassaga tushgan</div>
+                  </div>
+
+                  {/* Unpaid / Debt */}
+                  <div
+                    onClick={() => setServiceForm({ ...serviceForm, payment_status: 'UNPAID' })}
+                    style={{
+                      border: serviceForm.payment_status === 'UNPAID' ? '2px solid #f59e0b' : '1px solid var(--border)',
+                      backgroundColor: serviceForm.payment_status === 'UNPAID' ? 'rgba(245, 158, 11, 0.08)' : 'var(--surface)',
+                      borderRadius: '8px',
+                      padding: '10px 8px',
+                      cursor: 'pointer',
+                      textAlign: 'center',
+                      transition: 'all 0.15s'
+                    }}
+                  >
+                    <div style={{ fontWeight: 700, fontSize: '0.82rem', color: serviceForm.payment_status === 'UNPAID' ? '#d97706' : 'var(--text-main)', marginBottom: '2px' }}>
+                      🟡 Nasiya (Qarz)
+                    </div>
+                    <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>Mijoz qarzdor</div>
+                  </div>
+
+                  {/* Internal */}
+                  <div
+                    onClick={() => setServiceForm({ ...serviceForm, payment_status: 'INTERNAL' })}
+                    style={{
+                      border: serviceForm.payment_status === 'INTERNAL' ? '2px solid var(--primary)' : '1px solid var(--border)',
+                      backgroundColor: serviceForm.payment_status === 'INTERNAL' ? 'var(--primary-light)' : 'var(--surface)',
+                      borderRadius: '8px',
+                      padding: '10px 8px',
+                      cursor: 'pointer',
+                      textAlign: 'center',
+                      transition: 'all 0.15s'
+                    }}
+                  >
+                    <div style={{ fontWeight: 700, fontSize: '0.82rem', color: serviceForm.payment_status === 'INTERNAL' ? 'var(--primary)' : 'var(--text-main)', marginBottom: '2px' }}>
+                      🏢 Ichki xizmat
+                    </div>
+                    <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>Ustaxona hisobidan</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Payment Method (if PAID) */}
+              {serviceForm.payment_status === 'PAID' && (
+                <div className="input-group" style={{ marginBottom: '14px' }}>
+                  <label style={{ fontSize: '0.82rem', fontWeight: 700, marginBottom: '4px', display: 'block' }}>
+                    To'lov usuli
+                  </label>
+                  <select
+                    value={serviceForm.payment_method}
+                    onChange={e => setServiceForm({ ...serviceForm, payment_method: e.target.value })}
+                    className="input-field"
+                    style={{ width: '100%', height: '36px' }}
+                  >
+                    <option value="CASH">💵 Naqd pul (Kassaga kirim bo'ladi)</option>
+                    <option value="CARD">💳 Plastik karta</option>
+                    <option value="BANK_TRANSFER">🏦 Hisob raqam / O'tkazma</option>
+                  </select>
+                </div>
+              )}
+
+              {/* Client / Organization (Required if UNPAID, optional otherwise) */}
+              <div className="input-group" style={{ marginBottom: '14px' }}>
+                <label style={{ fontSize: '0.82rem', fontWeight: 700, marginBottom: '4px', display: 'block' }}>
+                  Mijoz / Tashkilot {serviceForm.payment_status === 'UNPAID' ? <span style={{ color: 'var(--danger)' }}>* (Qarzda shart)</span> : <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(Ixtiyoriy)</span>}
+                </label>
+                <select
+                  required={serviceForm.payment_status === 'UNPAID'}
+                  value={serviceForm.client_id}
+                  onChange={e => setServiceForm({ ...serviceForm, client_id: e.target.value })}
+                  className="input-field"
+                  style={{ width: '100%', height: '36px' }}
+                >
+                  <option value="">Tanlanmagan (Oddiy mijoz)</option>
+                  {clientsData?.map(c => (
+                    <option key={c.id} value={c.id}>
+                      {c.is_company ? `[Tashkilot] ${c.name}` : c.name} {c.phone_number ? `(${c.phone_number})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Car Plate Number */}
+              <div className="input-group" style={{ marginBottom: '14px' }}>
+                <label style={{ fontSize: '0.82rem', fontWeight: 700, marginBottom: '4px', display: 'block' }}>
+                  Avtomobil raqami / Rusumi <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(Ixtiyoriy)</span>
+                </label>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                  <input
+                    type="text"
+                    placeholder="01 A 777 AA"
+                    value={serviceForm.car_plate}
+                    onChange={e => setServiceForm({ ...serviceForm, car_plate: e.target.value.toUpperCase() })}
+                    className="input-field"
+                    style={{ height: '36px' }}
+                  />
+                  <input
+                    type="text"
+                    placeholder="Cobalt, Lacetti..."
+                    value={serviceForm.car_type}
+                    onChange={e => setServiceForm({ ...serviceForm, car_type: e.target.value })}
+                    className="input-field"
+                    style={{ height: '36px' }}
+                  />
+                </div>
+              </div>
+
+              {/* Note */}
+              <div className="input-group" style={{ marginBottom: '18px' }}>
+                <label style={{ fontSize: '0.82rem', fontWeight: 700, marginBottom: '4px', display: 'block' }}>
+                  Qo'shimcha izoh <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(Ixtiyoriy)</span>
+                </label>
+                <input
+                  type="text"
+                  placeholder="Ish haqida qisqacha izoh..."
+                  value={serviceForm.note}
+                  onChange={e => setServiceForm({ ...serviceForm, note: e.target.value })}
+                  className="input-field"
+                  style={{ width: '100%', height: '36px' }}
+                />
+              </div>
+
+              {/* Cashflow badge info */}
+              {serviceForm.payment_status === 'PAID' && serviceForm.payment_method === 'CASH' && activeShift && (
+                <div style={{
+                  padding: '8px 12px',
+                  backgroundColor: 'rgba(16, 185, 129, 0.08)',
+                  border: '1px solid rgba(16, 185, 129, 0.25)',
+                  borderRadius: '8px',
+                  fontSize: '0.76rem',
+                  marginBottom: '16px',
+                  color: '#065f46'
+                }}>
+                  ✅ Faol kassa smenasi (#{activeShift.id}) mavjud. Naqd xizmat haqi kassa kirimiga avtomatik qo'shiladi.
+                </div>
+              )}
+
+              {/* Buttons */}
+              <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+                <button
+                  type="button"
+                  onClick={() => setShowAddServiceModal(false)}
+                  className="btn btn-secondary"
+                  style={{ height: '38px', padding: '0 16px' }}
+                >
+                  Bekor qilish
+                </button>
+                <button
+                  type="submit"
+                  disabled={addServiceMutation.isPending}
+                  className="btn btn-primary"
+                  style={{ height: '38px', padding: '0 20px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '6px' }}
+                >
+                  <Wrench size={15} />
+                  {addServiceMutation.isPending ? "Saqlanmoqda..." : "Xizmat haqini yozish"}
                 </button>
               </div>
             </form>

@@ -3,7 +3,7 @@ from decimal import Decimal
 from .models import (
     User, Category, Unit, PaymentMethod, Product, Inventory, StockTransfer, Client, Car, 
     ProductReceipt, ProductReceiptItem, Sale, SaleItem, Shift, CashFlow, Debt, PrinterSetting,
-    CurrencySetting, SaleService, WorkerTransaction
+    CurrencySetting, SaleService, WorkerTransaction, ClientTransaction
 )
 
 class CurrencySettingSerializer(serializers.ModelSerializer):
@@ -268,26 +268,29 @@ class SaleSerializer(serializers.ModelSerializer):
         if not items_data and not services_data:
             raise serializers.ValidationError({"detail": "Kamida bitta mahsulot yoki xizmat ko'rsatilishi kerak."})
 
-        # Calculate items and services totals
-        items_total = sum(float(i.get('price', 0)) * float(i.get('quantity', 1)) for i in items_data)
-        services_total = sum(float(s.get('amount', 0)) for s in services_data)
+        # Calculate items and services totals: prefer 'total' if provided, else round(price * quantity)
+        items_total = sum(
+            round(float(i['total'])) if ('total' in i and i['total'] is not None) else round(float(i.get('price', 0)) * float(i.get('quantity', 1)))
+            for i in items_data
+        )
+        services_total = sum(round(float(s.get('amount', 0))) for s in services_data)
         calc_total = items_total + services_total
         
         if payments_data:
-            paid_amount = sum(float(p.get('amount', 0)) for p in payments_data)
-            validated_data['paid_amount'] = paid_amount
+            paid_amount = sum(round(float(p.get('amount', 0))) for p in payments_data)
+            validated_data['paid_amount'] = Decimal(str(paid_amount))
             if 'payment_type' not in validated_data and len(payments_data) > 0:
                 method = PaymentMethod.objects.filter(id=payments_data[0].get('method')).first()
                 validated_data['payment_type'] = method
                 
-        total_amount = float(validated_data.get('total_amount', calc_total))
+        total_amount = round(float(validated_data.get('total_amount', calc_total)))
         if calc_total > 0 and (total_amount == 0 or 'total_amount' not in validated_data):
             total_amount = calc_total
-        validated_data['total_amount'] = total_amount
+        validated_data['total_amount'] = Decimal(str(total_amount))
 
-        paid_amount = float(validated_data.get('paid_amount', 0))
-        debt_amount = float(validated_data.get('debt_amount', max(0.0, total_amount - paid_amount)))
-        validated_data['debt_amount'] = debt_amount
+        paid_amount = round(float(validated_data.get('paid_amount', 0)))
+        debt_amount = round(float(validated_data.get('debt_amount', max(0.0, total_amount - paid_amount))))
+        validated_data['debt_amount'] = Decimal(str(debt_amount))
 
         # Enforce due_date when sale has debt
         if debt_amount > 0 and not validated_data.get('due_date'):
@@ -298,7 +301,10 @@ class SaleSerializer(serializers.ModelSerializer):
         for item_data in items_data:
             qty_needed = float(item_data['quantity'])
             price = float(item_data['price'])
-            total = qty_needed * price
+            if 'total' in item_data and item_data['total'] is not None:
+                total = round(float(item_data['total']))
+            else:
+                total = round(qty_needed * price)
             product_id = item_data['product']
             
             # FIFO logic
@@ -333,10 +339,10 @@ class SaleSerializer(serializers.ModelSerializer):
             SaleItem.objects.create(
                 sale=sale,
                 product_id=product_id,
-                quantity=qty_needed,
-                price=price,
-                total=total,
-                total_cost=total_cost_for_this_item
+                quantity=Decimal(str(qty_needed)),
+                price=Decimal(str(price)),
+                total=Decimal(str(total)),
+                total_cost=Decimal(str(round(total_cost_for_this_item, 2)))
             )
 
         for svc_data in services_data:
@@ -446,7 +452,10 @@ class SaleSerializer(serializers.ModelSerializer):
                 
                 qty_needed = float(item_data.get('quantity', 0))
                 price = float(item_data.get('price', 0))
-                total = qty_needed * price
+                if 'total' in item_data and item_data['total'] is not None:
+                    total = round(float(item_data['total']))
+                else:
+                    total = round(qty_needed * price)
                 new_total += total
                 
                 # FIFO logic
@@ -480,16 +489,16 @@ class SaleSerializer(serializers.ModelSerializer):
                 SaleItem.objects.create(
                     sale=instance,
                     product_id=prod_id,
-                    quantity=qty_needed,
-                    price=price,
-                    total=total,
-                    total_cost=total_cost_for_this_item
+                    quantity=Decimal(str(qty_needed)),
+                    price=Decimal(str(price)),
+                    total=Decimal(str(total)),
+                    total_cost=Decimal(str(round(total_cost_for_this_item, 2)))
                 )
             
             # Update instance amounts
-            services_total = sum(float(s.amount) for s in instance.services.all())
-            instance.total_amount = new_total + services_total
-            instance.debt_amount = max(0, float(instance.total_amount) - float(instance.paid_amount))
+            services_total = sum(round(float(s.amount)) for s in instance.services.all())
+            instance.total_amount = Decimal(str(round(new_total + services_total)))
+            instance.debt_amount = Decimal(str(max(0, round(float(instance.total_amount) - float(instance.paid_amount)))))
 
         services_data = self.initial_data.get('services', None)
         if services_data is not None:
@@ -505,10 +514,10 @@ class SaleSerializer(serializers.ModelSerializer):
                     amount=Decimal(str(svc_data.get('amount', 0))),
                     amount_usd=Decimal(str(svc_data.get('amount_usd', 0)))
                 )
-            items_total = sum(float(i.total) for i in instance.items.all())
-            services_total = sum(float(s.get('amount', 0)) for s in services_data)
-            instance.total_amount = items_total + services_total
-            instance.debt_amount = max(0, float(instance.total_amount) - float(instance.paid_amount))
+            items_total = sum(round(float(i.total)) for i in instance.items.all())
+            services_total = sum(round(float(s.get('amount', 0))) for s in services_data)
+            instance.total_amount = Decimal(str(round(items_total + services_total)))
+            instance.debt_amount = Decimal(str(max(0, round(float(instance.total_amount) - float(instance.paid_amount)))))
 
         # Handle payments update
         from .models import CashFlow, PaymentMethod
@@ -665,21 +674,73 @@ class WorkerTransactionSerializer(serializers.ModelSerializer):
     worker_name = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
     transaction_type_display = serializers.CharField(source='get_transaction_type_display', read_only=True)
+    category_display = serializers.CharField(source='get_category_display', read_only=True)
     payment_method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
+    paid_amount = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True)
+    remaining_amount = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True)
 
     class Meta:
         model = WorkerTransaction
         fields = [
             'id', 'worker', 'worker_name', 'transaction_type', 'transaction_type_display',
-            'amount', 'period_month', 'payment_method', 'payment_method_display',
+            'category', 'category_display', 'related_debt', 'related_sale',
+            'amount', 'paid_amount', 'remaining_amount', 'period_month',
+            'payment_method', 'payment_method_display',
             'shift', 'cashflow', 'note', 'created_by', 'created_by_name', 'created_at'
         ]
         read_only_fields = ['cashflow', 'created_by', 'shift']
+
+    def validate(self, data):
+        related_debt = data.get('related_debt')
+        amount = Decimal(str(data.get('amount') or 0))
+        trans_type = data.get('transaction_type')
+
+        if related_debt and trans_type == 'WORKER_PAYMENT':
+            rem = related_debt.remaining_amount
+            # If updating an existing repayment, adjust remaining
+            if self.instance and self.instance.related_debt == related_debt:
+                rem += self.instance.amount
+            if amount > rem:
+                raise serializers.ValidationError({
+                    "amount": f"To'lov summasi qarz qoldig'idan ({float(rem):,.0f} so'm) oshib ketmasligi kerak."
+                })
+
+        related_sale = data.get('related_sale')
+        if related_sale and trans_type == 'WORKER_PAYMENT':
+            if amount > related_sale.debt_amount:
+                raise serializers.ValidationError({
+                    "amount": f"To'lov summasi tovar qarzi qoldig'idan ({float(related_sale.debt_amount):,.0f} so'm) oshib ketmasligi kerak."
+                })
+
+        return data
 
     def get_worker_name(self, obj):
         if obj.worker:
             return obj.worker.get_full_name() or obj.worker.username or obj.worker.phone_number
         return ""
+
+    def get_created_by_name(self, obj):
+        if obj.created_by:
+            return obj.created_by.get_full_name() or obj.created_by.username
+        return ""
+
+
+class ClientTransactionSerializer(serializers.ModelSerializer):
+    client_name = serializers.CharField(source='client.name', read_only=True)
+    created_by_name = serializers.SerializerMethodField()
+    transaction_type_display = serializers.CharField(source='get_transaction_type_display', read_only=True)
+    payment_method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
+    sale_id = serializers.IntegerField(source='sale.id', read_only=True, allow_null=True)
+
+    class Meta:
+        model = ClientTransaction
+        fields = [
+            'id', 'client', 'client_name', 'sale', 'sale_id',
+            'transaction_type', 'transaction_type_display',
+            'amount', 'payment_method', 'payment_method_display',
+            'shift', 'cashflow', 'note', 'created_by', 'created_by_name', 'created_at'
+        ]
+        read_only_fields = ['cashflow', 'created_by', 'shift']
 
     def get_created_by_name(self, obj):
         if obj.created_by:

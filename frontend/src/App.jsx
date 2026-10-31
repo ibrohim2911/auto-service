@@ -1,6 +1,6 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
-import { LayoutDashboard, ShoppingBag, Package, Wallet, Users, Settings, LogOut, Clock, FileText, Wrench } from 'lucide-react';
+import { LayoutDashboard, ShoppingBag, Package, Wallet, Users, Settings, LogOut, Clock, FileText, Wrench, Building2 } from 'lucide-react';
 import { Toaster } from 'react-hot-toast';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import useAuthStore from './store';
@@ -14,6 +14,7 @@ import CashFlow from './pages/CashFlow';
 import Sales from './pages/Sales';
 import Shifts from './pages/Shifts';
 import WorkerTabs from './pages/WorkerTabs';
+import OrganizationTabs from './pages/OrganizationTabs';
 
 import Dashboard from './pages/Dashboard';
 import SettingsPage from './pages/Settings';
@@ -39,26 +40,27 @@ function Sidebar() {
     { path: '/cashflow', icon: <Wallet size={20} />, label: 'Pul oqimi' },
     { path: '/debts', icon: <FileText size={20} />, label: 'Tashqi qarzlar' },
     { path: '/worker-tabs', icon: <Wrench size={20} />, label: 'Ustalar hisobi (Tabel)' },
+    { path: '/organizations', icon: <Building2 size={20} />, label: 'Tashkilotlar (Fakturalar)' },
     { path: '/clients', icon: <Users size={20} />, label: 'Mijozlar' },
     { path: '/settings', icon: <Settings size={20} />, label: 'Sozlamalar' },
   ];
 
   return (
-    <aside style={{ width: '260px', minWidth: '260px', flexShrink: 0, backgroundColor: 'var(--surface)', borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column', zIndex: 10 }}>
-      <div style={{ padding: '32px 24px', fontSize: '1.75rem', fontWeight: 'bold', color: 'transparent', background: 'linear-gradient(135deg, var(--primary), #8b5cf6)', WebkitBackgroundClip: 'text' }}>
+    <aside style={{ width: '260px', minWidth: '260px', maxWidth: '260px', flexShrink: 0, backgroundColor: 'var(--surface)', borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column', height: '100vh', maxHeight: '100vh', overflow: 'hidden', zIndex: 10 }}>
+      <div style={{ padding: '20px 20px 14px', fontSize: '1.5rem', fontWeight: 'bold', color: 'transparent', background: 'linear-gradient(135deg, var(--primary), #8b5cf6)', WebkitBackgroundClip: 'text', flexShrink: 0 }}>
         AvtoXizmat
       </div>
-      <nav style={{ flex: 1, padding: '0 12px' }}>
+      <nav style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden', padding: '0 8px', scrollbarWidth: 'thin' }}>
         {navItems.map(item => (
           <Link 
             key={item.path} 
             to={item.path}
             style={{
-              display: 'flex', alignItems: 'center', gap: '14px', padding: '14px 18px', borderRadius: '12px',
+              display: 'flex', alignItems: 'center', gap: '12px', padding: '9px 12px', borderRadius: '10px', fontSize: '0.86rem', whiteSpace: 'nowrap',
               color: location.pathname === item.path ? 'var(--primary)' : 'var(--text-muted)',
               background: location.pathname === item.path ? 'linear-gradient(90deg, var(--primary-light), transparent)' : 'transparent',
               borderLeft: location.pathname === item.path ? '3px solid var(--primary)' : '3px solid transparent',
-              textDecoration: 'none', fontWeight: 600, marginBottom: '6px', transition: 'all 0.2s'
+              textDecoration: 'none', fontWeight: 600, marginBottom: '3px', transition: 'all 0.15s'
             }}
           >
             {item.icon}
@@ -66,7 +68,7 @@ function Sidebar() {
           </Link>
         ))}
       </nav>
-      <div style={{ padding: '24px' }}>
+      <div style={{ padding: '12px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
         <button 
           onClick={async () => {
             try {
@@ -76,7 +78,7 @@ function Sidebar() {
             logout();
           }}
           style={{
-            display: 'flex', alignItems: 'center', gap: '12px', width: '100%', padding: '14px 18px',
+            display: 'flex', alignItems: 'center', gap: '10px', width: '100%', padding: '10px 14px', fontSize: '0.86rem',
             borderRadius: '12px', border: 'none', backgroundColor: 'var(--danger-light)',
             color: 'var(--danger)', fontWeight: 600, cursor: 'pointer', transition: 'all 0.2s'
           }}
@@ -101,9 +103,9 @@ function App() {
         
         <Route path="/*" element={
           <ProtectedRoute>
-            <div style={{ display: 'flex', height: '100vh', backgroundColor: 'var(--bg-color)', color: 'var(--text-main)' }}>
+            <div style={{ display: 'flex', height: '100vh', maxHeight: '100vh', overflow: 'hidden', backgroundColor: 'var(--bg-color)', color: 'var(--text-main)' }}>
               <Sidebar />
-              <main style={{ flex: 1, overflow: 'auto' }}>
+              <main style={{ flex: 1, height: '100vh', maxHeight: '100vh', overflowY: 'auto', overflowX: 'hidden' }}>
                 <Routes>
                   <Route path="/" element={<Dashboard />} />
                   <Route path="/pos" element={<POS />} />
@@ -114,6 +116,8 @@ function App() {
                   <Route path="/debts" element={<Debts />} />
                   <Route path="/worker-tabs" element={<WorkerTabs />} />
                   <Route path="/ustalar" element={<WorkerTabs />} />
+                  <Route path="/organizations" element={<OrganizationTabs />} />
+                  <Route path="/tashkilotlar" element={<OrganizationTabs />} />
                   <Route path="/clients" element={<Clients />} />
                   <Route path="/settings" element={<SettingsPage />} />
                 </Routes>

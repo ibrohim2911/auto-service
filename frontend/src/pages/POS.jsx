@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Search, ShoppingCart, User, LogOut, Plus, Minus, CreditCard, Banknote, Trash2, Home, PackageOpen, X, Car as CarIcon, UserPlus, Calendar, AlertCircle, Clock, AlertTriangle, Wrench } from 'lucide-react';
+import { Search, ShoppingCart, User, LogOut, Plus, Minus, CreditCard, Banknote, Trash2, Home, PackageOpen, X, Car as CarIcon, UserPlus, Calendar, AlertCircle, Clock, AlertTriangle, Wrench, Edit3 } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import useAuthStore from '../store';
@@ -28,8 +28,8 @@ const CheckoutModal = ({ cart, total, services, setServices, onClose, onSuccess,
   const queryClient = useQueryClient();
   const defaultDueDate = useMemo(() => new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0], []);
   
-  const productsTotal = total;
-  const servicesTotal = (services || []).reduce((sum, s) => sum + (parseFloat(s.amount) || 0), 0);
+  const productsTotal = Math.round(total || 0);
+  const servicesTotal = (services || []).reduce((sum, s) => sum + Math.round(parseFloat(s.amount) || 0), 0);
   const grandTotal = productsTotal + servicesTotal;
 
   const [formData, setFormData] = useState({ 
@@ -37,7 +37,7 @@ const CheckoutModal = ({ cart, total, services, setServices, onClose, onSuccess,
     car: editSale?.car || '', 
     user: editSale?.user || user?.id || '', 
     due_date: editSale?.due_date || defaultDueDate,
-    payments: editSale ? [{ method: editSale.payment_type || '', amount: parseFloat(editSale.paid_amount) || grandTotal }] : [{ method: '', amount: grandTotal }] 
+    payments: editSale ? [{ method: editSale.payment_type || '', amount: Math.round(parseFloat(editSale.paid_amount) || grandTotal) }] : [{ method: '', amount: grandTotal }] 
   });
   const [printCashier, setPrintCashier] = useState(true);
   const [printWorker, setPrintWorker] = useState(true);
@@ -210,7 +210,7 @@ const CheckoutModal = ({ cart, total, services, setServices, onClose, onSuccess,
     }
   };
 
-  const totalPaid = formData.payments.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+  const totalPaid = Math.round(formData.payments.reduce((sum, p) => sum + Number(p.amount || 0), 0));
   const debt_amount = Math.max(0, grandTotal - totalPaid);
 
   const submit = async () => {
@@ -240,7 +240,7 @@ const CheckoutModal = ({ cart, total, services, setServices, onClose, onSuccess,
           worker: s.worker?.id || s.worker || null,
           worker_name: workerObj?.first_name || workerObj?.username || s.worker_name || '',
           service_name: s.service_name || "Xizmat haqi",
-          amount: parseFloat(s.amount) || 0
+          amount: Math.round(parseFloat(s.amount) || 0)
         };
       });
 
@@ -249,14 +249,18 @@ const CheckoutModal = ({ cart, total, services, setServices, onClose, onSuccess,
       car: formData.car || null,
       client: formData.client || null,
       due_date: debt_amount > 0 ? (formData.due_date || defaultDueDate) : null,
-      total_amount: grandTotal,
-      debt_amount: debt_amount,
+      total_amount: Math.round(grandTotal),
+      debt_amount: Math.round(debt_amount),
+      paid_amount: Math.round(totalPaid),
       print: print_type !== 'none',
       print_type: print_type,
       items: cart.map(item => {
         const q = parseFloat(item.qty) || 1;
         const p = parseFloat(item.selling_price) || 0;
-        return { product: item.id, quantity: q, price: p, total: p * q };
+        const lineTot = item.line_total !== undefined 
+          ? Math.round(Number(item.line_total) || 0)
+          : Math.round(p * q);
+        return { product: item.id, quantity: q, price: p, total: lineTot };
       }),
       services: validServices
     };
@@ -331,7 +335,7 @@ const CheckoutModal = ({ cart, total, services, setServices, onClose, onSuccess,
               color: 'var(--primary)',
               letterSpacing: '0.3px'
             }}>
-              {total.toLocaleString()} SO'M
+              {Math.round(grandTotal).toLocaleString()} SO'M
             </div>
             <button
               type="button"
@@ -1229,24 +1233,260 @@ const CheckoutModal = ({ cart, total, services, setServices, onClose, onSuccess,
 };
 
 function POS() {
-  const [searchQuery, setSearchQuery] = useState('');
-  const [activeCategory, setActiveCategory] = useState('all');
-  const [cart, setCart] = useState(() => {
-    const saved = localStorage.getItem('pos_cart');
-    return saved ? JSON.parse(saved) : [];
-  });
-  const [posServices, setPosServices] = useState([]);
-  const [isCheckout, setIsCheckout] = useState(false);
-  const receiptRef = React.useRef();
-  const handlePrint = useReactToPrint({
-    content: () => receiptRef.current,
-  });
-  
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const editId = searchParams.get('edit');
   const { logout, user } = useAuthStore();
   const queryClient = useQueryClient();
+
+  const receiptRef = React.useRef();
+  const handlePrint = useReactToPrint({
+    content: () => receiptRef.current,
+  });
+  const [isCheckout, setIsCheckout] = useState(false);
+
+  const [searchQuery, setSearchQuery] = useState('');
+  const [activeCategory, setActiveCategory] = useState('all');
+  // Multi-Tab Order System
+  const [tabs, setTabs] = useState(() => {
+    try {
+      const saved = localStorage.getItem('pos_tabs');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed.map(tab => ({
+            ...tab,
+            cart: (tab.cart || []).map(item => {
+              const q = parseFloat(item.qty) || 1;
+              const p = parseFloat(item.selling_price) || 0;
+              const lineTot = item.line_total !== undefined 
+                ? Math.round(Number(item.line_total) || 0) 
+                : Math.round(p * q);
+              return { ...item, line_total: lineTot };
+            })
+          }));
+        }
+      }
+      const legacy = localStorage.getItem('pos_cart');
+      if (legacy) {
+        const parsedLegacy = JSON.parse(legacy);
+        if (Array.isArray(parsedLegacy) && parsedLegacy.length > 0) {
+          return [{
+            id: 'tab-1',
+            title: 'Chek #1',
+            cart: parsedLegacy.map(item => {
+              const q = parseFloat(item.qty) || 1;
+              const p = parseFloat(item.selling_price) || 0;
+              const lineTot = item.line_total !== undefined 
+                ? Math.round(Number(item.line_total) || 0) 
+                : Math.round(p * q);
+              return { ...item, line_total: lineTot };
+            }),
+            services: [],
+            createdAt: Date.now()
+          }];
+        }
+      }
+    } catch (e) {
+      console.error("Failed to parse POS tabs:", e);
+    }
+    return [{
+      id: 'tab-1',
+      title: 'Chek #1',
+      cart: [],
+      services: [],
+      createdAt: Date.now()
+    }];
+  });
+
+  const [activeTabId, setActiveTabId] = useState(() => {
+    const saved = localStorage.getItem('pos_active_tab_id');
+    return saved || 'tab-1';
+  });
+
+  // Ensure activeTabId remains valid
+  React.useEffect(() => {
+    if (tabs.length > 0 && !tabs.some(t => t.id === activeTabId)) {
+      setActiveTabId(tabs[0].id);
+    }
+  }, [tabs, activeTabId]);
+
+  // Persist tabs and activeTabId to localStorage
+  React.useEffect(() => {
+    if (!editId) {
+      localStorage.setItem('pos_tabs', JSON.stringify(tabs));
+    }
+  }, [tabs, editId]);
+
+  React.useEffect(() => {
+    if (!editId && activeTabId) {
+      localStorage.setItem('pos_active_tab_id', activeTabId);
+    }
+  }, [activeTabId, editId]);
+
+  const activeTab = useMemo(() => {
+    return tabs.find(t => t.id === activeTabId) || tabs[0] || { id: 'tab-1', title: 'Chek #1', cart: [], services: [] };
+  }, [tabs, activeTabId]);
+
+  const cart = activeTab.cart || [];
+  const posServices = activeTab.services || [];
+
+  const activeTabIdRef = React.useRef(activeTabId);
+  activeTabIdRef.current = activeTabId;
+
+  const setCart = React.useCallback((action) => {
+    const currentId = activeTabIdRef.current;
+    setTabs(prevTabs => {
+      return prevTabs.map(tab => {
+        if (tab.id === currentId) {
+          const currentCart = tab.cart || [];
+          const newCart = typeof action === 'function' ? action(currentCart) : action;
+          return { ...tab, cart: newCart };
+        }
+        return tab;
+      });
+    });
+  }, []);
+
+  const setPosServices = React.useCallback((action) => {
+    const currentId = activeTabIdRef.current;
+    setTabs(prevTabs => {
+      return prevTabs.map(tab => {
+        if (tab.id === currentId) {
+          const currentServices = tab.services || [];
+          const newServices = typeof action === 'function' ? action(currentServices) : action;
+          return { ...tab, services: newServices };
+        }
+        return tab;
+      });
+    });
+  }, []);
+
+  const handleCreateTab = React.useCallback(() => {
+    setTabs(prevTabs => {
+      let nextNum = 1;
+      const existingNums = prevTabs
+        .map(t => {
+          const m = t.title?.match(/^Chek #(\d+)$/i);
+          return m ? parseInt(m[1], 10) : null;
+        })
+        .filter(n => n !== null);
+
+      if (existingNums.length > 0) {
+        nextNum = Math.max(...existingNums) + 1;
+      } else {
+        nextNum = prevTabs.length + 1;
+      }
+
+      const newTabId = `tab_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      const newTab = {
+        id: newTabId,
+        title: `Chek #${nextNum}`,
+        cart: [],
+        services: [],
+        createdAt: Date.now()
+      };
+      setActiveTabId(newTabId);
+      toast.success(`${newTab.title} ochildi`);
+      return [...prevTabs, newTab];
+    });
+  }, []);
+
+  const handleCloseTab = React.useCallback((tabIdToClose, e) => {
+    if (e) e.stopPropagation();
+    setTabs(prevTabs => {
+      const tabToClose = prevTabs.find(t => t.id === tabIdToClose);
+      if (!tabToClose) return prevTabs;
+
+      const hasItems = (tabToClose.cart && tabToClose.cart.length > 0) || (tabToClose.services && tabToClose.services.length > 0);
+      if (hasItems) {
+        const confirmed = window.confirm(`"${tabToClose.title}" savatchasida mahsulot yoki xizmatlar mavjud. Ushbu chekni yopishni tasdiqlaysizmi?`);
+        if (!confirmed) return prevTabs;
+      }
+
+      if (prevTabs.length <= 1) {
+        const resetTabId = `tab_${Date.now()}`;
+        setActiveTabId(resetTabId);
+        return [{
+          id: resetTabId,
+          title: 'Chek #1',
+          cart: [],
+          services: [],
+          createdAt: Date.now()
+        }];
+      }
+
+      const closedIndex = prevTabs.findIndex(t => t.id === tabIdToClose);
+      const newTabs = prevTabs.filter(t => t.id !== tabIdToClose);
+
+      if (activeTabIdRef.current === tabIdToClose) {
+        const nextActiveIndex = Math.max(0, closedIndex - 1);
+        setActiveTabId(newTabs[nextActiveIndex]?.id || newTabs[0].id);
+      }
+      return newTabs;
+    });
+  }, []);
+
+  const [editingTabTitleId, setEditingTabTitleId] = useState(null);
+  const [tabTitleInput, setTabTitleInput] = useState('');
+
+  const handleStartRename = (tab, e) => {
+    if (e) e.stopPropagation();
+    setEditingTabTitleId(tab.id);
+    setTabTitleInput(tab.title || '');
+  };
+
+  const handleSaveRename = () => {
+    if (!editingTabTitleId) return;
+    const trimmed = tabTitleInput.trim();
+    if (trimmed) {
+      setTabs(prev => prev.map(t => t.id === editingTabTitleId ? { ...t, title: trimmed } : t));
+    }
+    setEditingTabTitleId(null);
+  };
+
+  const handleClearActiveTab = () => {
+    if (cart.length === 0 && posServices.length === 0) return;
+    if (window.confirm(`"${activeTab.title}" savatchasini tozalashni tasdiqlaysizmi?`)) {
+      setCart([]);
+      setPosServices([]);
+      toast.success("Savatcha tozalandi");
+    }
+  };
+
+  const handleCancelEdit = () => {
+    setCart([]);
+    setPosServices([]);
+    sessionStorage.removeItem(`loaded_edit_${editId}`);
+    setSearchParams({});
+    navigate('/pos');
+  };
+
+  const handleCheckoutSuccess = () => {
+    if (editId) {
+      sessionStorage.removeItem(`loaded_edit_${editId}`);
+      setSearchParams({});
+      navigate('/sales');
+    } else {
+      setTabs(prevTabs => {
+        if (prevTabs.length > 1) {
+          const remaining = prevTabs.filter(t => t.id !== activeTabId);
+          const nextActiveId = remaining[0]?.id || '';
+          setActiveTabId(nextActiveId);
+          return remaining;
+        } else {
+          return prevTabs.map(t => {
+            if (t.id === activeTabId) {
+              return { ...t, cart: [], services: [] };
+            }
+            return t;
+          });
+        }
+      });
+    }
+    setIsCheckout(false);
+    queryClient.invalidateQueries({ queryKey: ['shifts'] });
+  };
 
   // Shift tracking in POS
   const { data: currentShiftData } = useQuery({
@@ -1345,11 +1585,15 @@ function POS() {
     if (editSale && allProducts && cart.length === 0 && !sessionStorage.getItem(`loaded_edit_${editId}`)) {
       const editCart = editSale.items.map(item => {
         const p = allProducts.find(prod => prod.id === item.product);
+        const q = parseFloat(item.quantity) || 1;
+        const price = parseFloat(item.price) || 0;
+        const lineTot = item.total != null ? Math.round(parseFloat(item.total)) : Math.round(price * q);
         return {
           id: item.product,
           name: p ? p.name : `Product #${item.product}`,
-          qty: parseFloat(item.quantity),
-          selling_price: parseFloat(item.price)
+          qty: q,
+          selling_price: price,
+          line_total: lineTot
         };
       });
       setCart(editCart);
@@ -1358,16 +1602,12 @@ function POS() {
           worker: s.worker,
           worker_name: s.worker_name,
           service_name: s.service_name,
-          amount: parseFloat(s.amount)
+          amount: Math.round(parseFloat(s.amount) || 0)
         })));
       }
       sessionStorage.setItem(`loaded_edit_${editId}`, 'true');
     }
   }, [editSale, allProducts]);
-
-  React.useEffect(() => {
-    if (!editId) localStorage.setItem('pos_cart', JSON.stringify(cart));
-  }, [cart, editId]);
 
   const filteredProducts = productsData || [];
 
@@ -1375,9 +1615,26 @@ function POS() {
     setCart(prev => {
       const existing = prev.find(item => item.id === product.id);
       if (existing) {
-        return prev.map(item => item.id === product.id ? { ...item, qty: item.qty + 1 } : item);
+        return prev.map(item => {
+          if (item.id === product.id) {
+            const newQty = (parseFloat(item.qty) || 0) + 1;
+            const unitPrice = parseFloat(item.selling_price) || 0;
+            return {
+              ...item,
+              qty: newQty,
+              line_total: Math.round(unitPrice * newQty)
+            };
+          }
+          return item;
+        });
       }
-      return [...prev, { ...product, qty: 1 }];
+      const initialPrice = parseFloat(product.selling_price) || 0;
+      return [...prev, {
+        ...product,
+        qty: 1,
+        selling_price: initialPrice,
+        line_total: Math.round(initialPrice * 1)
+      }];
     });
   }, []);
 
@@ -1418,19 +1675,73 @@ function POS() {
     };
   }, [barcodeBuffer, isCheckout, addToCart]);
 
+  // Keyboard shortcuts for Multi-Tab order switching (Alt+T / Alt+N: New, Alt+W: Close, Alt+1..9: Switch)
+  React.useEffect(() => {
+    const handleTabShortcuts = (e) => {
+      if (isCheckout || showPosOpenShift || showPosCloseShift) return;
+
+      if (e.altKey) {
+        if (e.code === 'KeyT' || e.code === 'KeyN' || e.key === 't' || e.key === 'T' || e.key === 'n' || e.key === 'N') {
+          e.preventDefault();
+          handleCreateTab();
+          return;
+        }
+
+        if (e.code === 'KeyW' || e.key === 'w' || e.key === 'W') {
+          e.preventDefault();
+          handleCloseTab(activeTabId);
+          return;
+        }
+
+        if ((e.key >= '1' && e.key <= '9') || (e.code && e.code.startsWith('Digit') && e.code[5] >= '1' && e.code[5] <= '9')) {
+          const digit = parseInt(e.key || e.code[5], 10);
+          const targetIndex = digit - 1;
+          if (tabs[targetIndex]) {
+            e.preventDefault();
+            setActiveTabId(tabs[targetIndex].id);
+          }
+          return;
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleTabShortcuts);
+    return () => window.removeEventListener('keydown', handleTabShortcuts);
+  }, [tabs, activeTabId, isCheckout, showPosOpenShift, showPosCloseShift, handleCreateTab, handleCloseTab]);
+
   const updateQty = (id, delta) => {
     setCart(prev => prev.map(item => {
       if (item.id === id) {
         const current = parseFloat(item.qty) || 0;
         const newQty = Math.round((current + delta) * 1000) / 1000;
-        return newQty > 0 ? { ...item, qty: newQty } : item;
+        if (newQty <= 0) return item;
+        const unitPrice = parseFloat(item.selling_price) || 0;
+        return { 
+          ...item, 
+          qty: newQty,
+          line_total: Math.round(unitPrice * newQty),
+          total_override: undefined
+        };
       }
       return item;
     }));
   };
 
   const updatePrice = (id, newPrice) => {
-    setCart(prev => prev.map(item => item.id === id ? { ...item, selling_price: newPrice, total_override: undefined } : item));
+    setCart(prev => prev.map(item => {
+      if (item.id === id) {
+        const qty = parseFloat(item.qty) || 1;
+        const parsedPrice = parseFloat(newPrice);
+        const newLineTotal = !isNaN(parsedPrice) ? Math.round(parsedPrice * qty) : item.line_total;
+        return { 
+          ...item, 
+          selling_price: newPrice, 
+          line_total: newLineTotal,
+          total_override: undefined 
+        };
+      }
+      return item;
+    }));
   };
 
   const updateTotal = (id, newTotal) => {
@@ -1438,11 +1749,13 @@ function POS() {
       if (item.id === id) {
         const qty = parseFloat(item.qty) || 1;
         const totalNum = parseFloat(newTotal);
-        if (!isNaN(totalNum) && qty > 0) {
-          const rawPrice = totalNum / qty;
-          const calculatedPrice = Math.round(rawPrice * 100) / 100;
+        if (!isNaN(totalNum)) {
+          const roundedTotal = Math.round(totalNum);
+          const rawUnitPrice = qty > 0 ? (roundedTotal / qty) : 0;
+          const calculatedPrice = Number(rawUnitPrice.toFixed(2));
           return {
             ...item,
+            line_total: roundedTotal,
             selling_price: calculatedPrice,
             total_override: newTotal
           };
@@ -1458,8 +1771,13 @@ function POS() {
 
   const removeFromCart = (id) => setCart(prev => prev.filter(item => item.id !== id));
 
-  const total = cart.reduce((sum, item) => sum + ((parseFloat(item.selling_price) || 0) * (parseFloat(item.qty) || 0)), 0);
-  const servicesTotal = posServices.reduce((sum, s) => sum + (parseFloat(s.amount) || 0), 0);
+  const total = cart.reduce((sum, item) => {
+    const lineTot = item.line_total !== undefined 
+      ? Math.round(Number(item.line_total) || 0)
+      : Math.round((parseFloat(item.selling_price) || 0) * (parseFloat(item.qty) || 0));
+    return sum + lineTot;
+  }, 0);
+  const servicesTotal = posServices.reduce((sum, s) => sum + Math.round(parseFloat(s.amount) || 0), 0);
   const grandTotal = total + servicesTotal;
 
   return (
@@ -1636,18 +1954,187 @@ function POS() {
       </main>
 
       <aside className="cart-sidebar">
-        <div className="cart-header">
-          <h2>{editId ? `Sotuvni tahrirlash #${editId}` : 'Joriy buyurtma'}</h2>
-          {editId && (
-            <button className="btn btn-secondary" style={{ padding: '4px 8px', fontSize: '0.8rem' }} onClick={() => {
-              setCart([]);
-              sessionStorage.removeItem(`loaded_edit_${editId}`);
-              setSearchParams({});
-              navigate('/pos');
-            }}>
-              Tahrirni bekor qilish
+        {/* Multi-Tab Order Bar */}
+        {!editId && (
+          <div className="pos-tabs-strip">
+            {tabs.map((tab, index) => {
+              const tabItemCount = (tab.cart || []).reduce((acc, it) => acc + (parseFloat(it.qty) || 1), 0) + (tab.services || []).length;
+              const isActive = tab.id === activeTabId;
+              const isRenaming = editingTabTitleId === tab.id;
+
+              return (
+                <div
+                  key={tab.id}
+                  className={`pos-tab-item ${isActive ? 'active' : ''}`}
+                  onClick={() => !isRenaming && setActiveTabId(tab.id)}
+                  onDoubleClick={(e) => handleStartRename(tab, e)}
+                  title={`${tab.title} (Alt+${index + 1}). Nomini o'zgartirish uchun 2 marta bosing.`}
+                >
+                  {isRenaming ? (
+                    <input
+                      type="text"
+                      value={tabTitleInput}
+                      onChange={e => setTabTitleInput(e.target.value)}
+                      onBlur={handleSaveRename}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') handleSaveRename();
+                        if (e.key === 'Escape') setEditingTabTitleId(null);
+                      }}
+                      autoFocus
+                      onClick={e => e.stopPropagation()}
+                      style={{
+                        width: '80px',
+                        padding: '2px 4px',
+                        fontSize: '0.78rem',
+                        border: '1px solid var(--primary)',
+                        borderRadius: '4px',
+                        background: 'var(--bg-color)',
+                        color: 'var(--text-main)',
+                        outline: 'none'
+                      }}
+                    />
+                  ) : (
+                    <>
+                      <span className="pos-tab-title">{tab.title || `Chek #${index + 1}`}</span>
+                      {tabItemCount > 0 && (
+                        <span className="pos-tab-count">
+                          {Number(tabItemCount.toFixed(1)) % 1 === 0 ? parseInt(tabItemCount) : tabItemCount.toFixed(1)}
+                        </span>
+                      )}
+                    </>
+                  )}
+
+                  {tabs.length > 1 && (
+                    <button
+                      type="button"
+                      className="pos-tab-close-btn"
+                      onClick={(e) => handleCloseTab(tab.id, e)}
+                      title="Chekni yopish (Alt+W)"
+                    >
+                      <X size={12} />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+
+            <button
+              type="button"
+              className="pos-add-tab-btn"
+              onClick={handleCreateTab}
+              title="Yangi chek ochish (Alt+T yoki Alt+N)"
+            >
+              <Plus size={13} /> Yangi chek
             </button>
-          )}
+          </div>
+        )}
+
+        <div className="cart-header" style={{ padding: '14px 18px', borderBottom: '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, flex: 1 }}>
+              {editingTabTitleId === activeTab.id ? (
+                <input
+                  type="text"
+                  value={tabTitleInput}
+                  onChange={e => setTabTitleInput(e.target.value)}
+                  onBlur={handleSaveRename}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') handleSaveRename();
+                    if (e.key === 'Escape') setEditingTabTitleId(null);
+                  }}
+                  autoFocus
+                  style={{
+                    fontSize: '1rem',
+                    fontWeight: 700,
+                    padding: '3px 8px',
+                    borderRadius: '6px',
+                    border: '1.5px solid var(--primary)',
+                    background: 'var(--bg-color)',
+                    color: 'var(--text-main)',
+                    width: '100%',
+                    maxWidth: '180px'
+                  }}
+                />
+              ) : (
+                <>
+                  <h2 
+                    style={{ 
+                      fontSize: '1.05rem', 
+                      fontWeight: 700, 
+                      margin: 0, 
+                      whiteSpace: 'nowrap', 
+                      overflow: 'hidden', 
+                      textOverflow: 'ellipsis',
+                      cursor: editId ? 'default' : 'pointer'
+                    }}
+                    onClick={(e) => !editId && handleStartRename(activeTab, e)}
+                    title={editId ? '' : "Nomini o'zgartirish uchun bosing"}
+                  >
+                    {editId ? `Sotuvni tahrirlash #${editId}` : (activeTab.title || 'Joriy chek')}
+                  </h2>
+                  {!editId && (
+                    <button
+                      type="button"
+                      className="btn-icon"
+                      style={{ color: 'var(--text-muted)', padding: '2px', cursor: 'pointer' }}
+                      onClick={(e) => handleStartRename(activeTab, e)}
+                      title="Chek nomini o'zgartirish (Mijoz yoki Mashina raqami)"
+                    >
+                      <Edit3 size={14} />
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              {editId ? (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  style={{ padding: '4px 8px', fontSize: '0.78rem' }}
+                  onClick={handleCancelEdit}
+                >
+                  Bekor qilish
+                </button>
+              ) : (
+                (cart.length > 0 || posServices.length > 0) && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ 
+                      padding: '4px 8px', 
+                      fontSize: '0.76rem', 
+                      display: 'flex', 
+                      alignItems: 'center', 
+                      gap: '4px',
+                      color: 'var(--danger)',
+                      borderColor: 'rgba(239, 68, 68, 0.25)'
+                    }}
+                    onClick={handleClearActiveTab}
+                    title="Ushbu chekdagi mahsulotlarni tozalash"
+                  >
+                    <Trash2 size={13} /> Tozalash
+                  </button>
+                )
+              )}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+            <span>
+              {cart.length + posServices.length > 0 ? (
+                <span>{cart.length} ta mahsulot{posServices.length > 0 ? `, ${posServices.length} ta xizmat` : ''}</span>
+              ) : (
+                <span>Savatcha bo'sh</span>
+              )}
+            </span>
+            {!editId && tabs.length > 1 && (
+              <span style={{ fontSize: '0.72rem', background: 'rgba(99, 102, 241, 0.1)', padding: '2px 6px', borderRadius: '4px', color: 'var(--primary)', fontWeight: 600 }}>
+                {tabs.length} ta faol chek
+              </span>
+            )}
+          </div>
         </div>
         
         <div className="cart-items">
@@ -1699,6 +2186,17 @@ function POS() {
                         title="1 dona narxi"
                         value={item.selling_price} 
                         onChange={e => updatePrice(item.id, e.target.value)}
+                        onBlur={e => {
+                          const parsed = parseFloat(e.target.value);
+                          const finalPrice = (!isNaN(parsed) && parsed >= 0) ? parsed : 0;
+                          const qty = parseFloat(item.qty) || 1;
+                          setCart(prev => prev.map(it => it.id === item.id ? {
+                            ...it,
+                            selling_price: finalPrice,
+                            line_total: Math.round(finalPrice * qty),
+                            total_override: undefined
+                          } : it));
+                        }}
                         className="cart-field-input"
                       />
                     </div>
@@ -1715,12 +2213,26 @@ function POS() {
                           value={item.qty}
                           onChange={e => {
                             const val = e.target.value;
-                            setCart(prev => prev.map(it => it.id === item.id ? { ...it, qty: val, total_override: undefined } : it));
+                            setCart(prev => prev.map(it => {
+                              if (it.id === item.id) {
+                                const parsedQty = parseFloat(val);
+                                const unitPrice = parseFloat(it.selling_price) || 0;
+                                const newLineTotal = (!isNaN(parsedQty) && parsedQty > 0) ? Math.round(unitPrice * parsedQty) : it.line_total;
+                                return { ...it, qty: val, line_total: newLineTotal, total_override: undefined };
+                              }
+                              return it;
+                            }));
                           }}
                           onBlur={e => {
                             const parsed = parseFloat(item.qty);
                             const finalQty = (!isNaN(parsed) && parsed > 0) ? parsed : 1;
-                            setCart(prev => prev.map(it => it.id === item.id ? { ...it, qty: finalQty } : it));
+                            const unitPrice = parseFloat(item.selling_price) || 0;
+                            setCart(prev => prev.map(it => it.id === item.id ? { 
+                              ...it, 
+                              qty: finalQty, 
+                              line_total: Math.round(unitPrice * finalQty),
+                              total_override: undefined
+                            } : it));
                           }}
                           className="cart-qty-val"
                         />
@@ -1735,10 +2247,25 @@ function POS() {
                         step="any"
                         title="Umumiy summa (o'zgartirsangiz dona narxi avtomatik hisoblanadi)"
                         placeholder="Jami"
-                        value={item.total_override !== undefined ? item.total_override : (Math.round((parseFloat(item.selling_price) || 0) * (parseFloat(item.qty) || 0)) || '')}
+                        value={item.total_override !== undefined ? item.total_override : (item.line_total !== undefined ? item.line_total : (Math.round((parseFloat(item.selling_price) || 0) * (parseFloat(item.qty) || 0)) || ''))}
                         onChange={e => updateTotal(item.id, e.target.value)}
                         onBlur={() => {
-                          setCart(prev => prev.map(it => it.id === item.id ? { ...it, total_override: undefined } : it));
+                          setCart(prev => prev.map(it => {
+                            if (it.id === item.id) {
+                              const finalLineTotal = it.line_total !== undefined 
+                                ? Math.round(Number(it.line_total) || 0) 
+                                : Math.round((parseFloat(it.selling_price) || 0) * (parseFloat(it.qty) || 0));
+                              const qty = parseFloat(it.qty) || 1;
+                              const unitPrice = qty > 0 ? Number((finalLineTotal / qty).toFixed(2)) : 0;
+                              return {
+                                ...it,
+                                line_total: finalLineTotal,
+                                selling_price: unitPrice,
+                                total_override: undefined
+                              };
+                            }
+                            return it;
+                          }));
                         }}
                         className="cart-field-input cart-total-input"
                       />
@@ -1830,17 +2357,7 @@ function POS() {
           activeShift={activeShift}
           onOpenShift={() => setShowPosOpenShift(true)}
           onClose={() => setIsCheckout(false)} 
-          onSuccess={() => {
-            setCart([]);
-            setPosServices([]);
-            if (editId) {
-              sessionStorage.removeItem(`loaded_edit_${editId}`);
-              setSearchParams({});
-              navigate('/sales');
-            }
-            setIsCheckout(false);
-            queryClient.invalidateQueries({ queryKey: ['shifts'] });
-          }} 
+          onSuccess={handleCheckoutSuccess} 
         />
       )}
 

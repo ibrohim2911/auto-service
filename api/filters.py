@@ -1,5 +1,5 @@
 import django_filters
-from .models import Product, Sale, CashFlow, Debt, ProductReceipt, Shift, StockTransfer, WorkerTransaction
+from .models import Product, Sale, CashFlow, Debt, ProductReceipt, Shift, StockTransfer, WorkerTransaction, ClientTransaction
 
 class ProductFilter(django_filters.FilterSet):
     min_price = django_filters.NumberFilter(field_name="selling_price", lookup_expr='gte')
@@ -84,6 +84,16 @@ class WorkerTransactionFilter(django_filters.FilterSet):
     
     class Meta:
         model = WorkerTransaction
-        fields = ['worker', 'transaction_type', 'period_month', 'payment_method']
+        fields = ['worker', 'transaction_type', 'category', 'period_month', 'payment_method', 'related_debt', 'related_sale']
+
+
+class ClientTransactionFilter(django_filters.FilterSet):
+    start_date = django_filters.DateTimeFilter(field_name="created_at", lookup_expr='gte')
+    end_date = django_filters.DateTimeFilter(field_name="created_at", lookup_expr='lte')
+
+    class Meta:
+        model = ClientTransaction
+        fields = ['client', 'sale', 'transaction_type', 'payment_method', 'shift']
+
 
 
