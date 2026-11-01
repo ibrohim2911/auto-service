@@ -113,20 +113,15 @@ class Product(TimeStampedModel):
 
     def save(self, *args, **kwargs):
         from decimal import Decimal
-        if not self.barcode:
-            from django.db import connection
-            try:
-                with connection.cursor() as cursor:
-                    cursor.execute("SELECT MAX(CAST(barcode AS INTEGER)) FROM api_product WHERE barcode GLOB '[0-9]*' AND length(barcode) <= 8")
-                    row = cursor.fetchone()
-                    max_code = row[0] if (row and row[0]) else 1000
-                    next_code = max_code + 1
-                    while Product.objects.filter(barcode=str(next_code)).exists():
-                        next_code += 1
-                    self.barcode = str(next_code)
-            except Exception:
-                import time
-                self.barcode = str(int(time.time()))[-8:]
+        if not self.barcode or not str(self.barcode).strip():
+            from .barcode_utils import generate_unique_ean13
+            self.barcode = generate_unique_ean13()
+        else:
+            parts = [p.strip() for p in str(self.barcode).split(',') if p.strip()]
+            if parts and len(parts[0]) == 12 and parts[0].isdigit():
+                from .barcode_utils import calculate_ean13_checksum
+                parts[0] = parts[0] + calculate_ean13_checksum(parts[0])
+                self.barcode = ', '.join(parts)
 
         try:
             usd_rate = Decimal(str(CurrencySetting.get_usd_rate()))
@@ -533,8 +528,8 @@ class PrinterSetting(TimeStampedModel):
     ip_address = models.CharField(max_length=100, blank=True, default='', verbose_name="IP Address")
     port = models.IntegerField(default=9100, verbose_name="Port")
     paper_width = models.CharField(max_length=10, default='80MM', choices=(('80MM', '80mm'), ('58MM', '58mm')), verbose_name="Paper Width")
-    label_width = models.IntegerField(default=50, verbose_name="Label Width (mm)")
-    label_height = models.IntegerField(default=30, verbose_name="Label Height (mm)")
+    label_width = models.IntegerField(default=58, verbose_name="Label Width (mm)")
+    label_height = models.IntegerField(default=40, verbose_name="Label Height (mm)")
     command_type = models.CharField(max_length=20, choices=COMMAND_TYPES, default='ESCPOS', verbose_name="Command Type")
     is_enabled = models.BooleanField(default=True, verbose_name="Is Enabled")
     auto_print = models.BooleanField(default=False, verbose_name="Auto-print on Sale")
@@ -565,8 +560,8 @@ class PrinterSetting(TimeStampedModel):
                 'printer_type': 'BARCODE',
                 'name': "Chiziqli belgi (Barcode)",
                 'connection_type': 'WINDOWS',
-                'label_width': 50,
-                'label_height': 30,
+                'label_width': 58,
+                'label_height': 40,
                 'command_type': 'TSPL',
                 'auto_print': False,
                 'is_enabled': True,

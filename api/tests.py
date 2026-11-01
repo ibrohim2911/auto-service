@@ -210,6 +210,81 @@ class PrinterTests(TestCase):
         self.assertIn('cashier', r_both.data['results'])
         self.assertIn('worker', r_both.data['results'])
 
+    def test_barcode_label_58x40_with_larger_name_and_artikuls(self):
+        from api.printer_service import get_barcode_label_svg, format_barcode_labels, render_barcode_label_image
+        barcode_setting = PrinterSetting.objects.get(printer_type='BARCODE')
+        self.assertEqual(barcode_setting.label_width, 58)
+        self.assertEqual(barcode_setting.label_height, 40)
+
+        # 1. Test SVG generation with 58x40mm dimensions, big name font, and artikuls at bottom
+        svg = get_barcode_label_svg(self.product.id, artikuls=['OEM-7711', 'ART-5522'])
+        self.assertIsNotNone(svg)
+        self.assertIn('width="58mm"', svg)
+        self.assertIn('height="40mm"', svg)
+        self.assertIn(self.product.name, svg)
+        self.assertIn('font-size: 25px', svg)
+        self.assertIn('OEM-7711', svg)
+        self.assertIn('ART-5522', svg)
+        self.assertIn('class="lbl-artikul"', svg)
+
+        # 2. Test TSPL output for 58x40 paper and artikuls
+        barcode_setting.command_type = 'TSPL'
+        barcode_setting.save()
+        tspl_bytes = format_barcode_labels(self.product, quantity=2, setting=barcode_setting, artikuls=['OEM-7711'])
+        tspl_text = tspl_bytes.decode('utf-8', errors='ignore')
+        self.assertIn('SIZE 58 mm, 40 mm', tspl_text)
+        self.assertIn('OEM-7711', tspl_text)
+        self.assertIn('PRINT 2, 1', tspl_text)
+
+        # 3. Test PIL image output dimensions (58*8=464, 40*8=320)
+        img = render_barcode_label_image(self.product, setting=barcode_setting, artikuls=['OEM-7711'])
+        self.assertEqual(img.size, (464, 320))
+
+    def test_api_print_barcode_with_custom_artikuls(self):
+        # Test JSON payload
+        response = self.client.post('/api/printers/print-barcode/', {
+            'product_id': self.product.id,
+            'quantity': 3,
+            'artikuls': ['ART-101', 'KOLODKA-02']
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('quantity'), 3)
+        self.assertIn('ART-101', response.data.get('label_svg', ''))
+        self.assertIn('KOLODKA-02', response.data.get('label_svg', ''))
+
+        # Test preview action as well
+        preview_resp = self.client.get('/api/printers/barcode-preview/', {
+            'product_id': self.product.id,
+            'artikuls': ['ART-101', 'KOLODKA-02']
+        })
+        self.assertEqual(preview_resp.status_code, status.HTTP_200_OK)
+        self.assertIn('ART-101', preview_resp.data.get('label_svg', ''))
+        self.assertIn('KOLODKA-02', preview_resp.data.get('label_svg', ''))
+
+    def test_product_creation_auto_generates_valid_ean13(self):
+        from api.barcode_utils import is_valid_ean13
+        p = Product.objects.create(name="EAN-13 Auto Test Product")
+        self.assertIsNotNone(p.barcode)
+        self.assertEqual(len(p.barcode), 13)
+        self.assertTrue(p.barcode.startswith('200'))
+        self.assertTrue(is_valid_ean13(p.barcode))
+
+    def test_generate_barcode_api_action(self):
+        from api.barcode_utils import is_valid_ean13
+        response = self.client.get('/api/products/generate-barcode/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        bc = response.data.get('barcode')
+        self.assertEqual(len(bc), 13)
+        self.assertTrue(is_valid_ean13(bc))
+        self.assertEqual(response.data.get('type'), 'EAN13')
+
+    def test_product_with_12_digits_completes_ean13_checksum(self):
+        from api.barcode_utils import is_valid_ean13
+        p = Product.objects.create(name="12 Digit Test Product", barcode="200987654321")
+        self.assertEqual(len(p.barcode), 13)
+        self.assertTrue(is_valid_ean13(p.barcode))
+        self.assertTrue(p.barcode.startswith("200987654321"))
+
 
 class CarAndClientCreationTests(TestCase):
     def setUp(self):
@@ -870,6 +945,46 @@ class WorkerTabTests(TestCase):
         res_custom = self.client.get('/api/dashboard-stats/?date_from=2026-10-01&date_to=2026-10-31')
         self.assertEqual(res_custom.status_code, status.HTTP_200_OK)
         self.assertEqual(res_custom.data['period_info']['period'], 'custom')
+
+    def test_unrelated_debt_not_assigned_to_worker(self):
+        from api.views import get_worker_open_debts_and_balances
+        # Create worker with empty or specific phone number
+        worker_no_phone = User.objects.create_user(
+            username="worker_empty_phone",
+            role="WORKER",
+            phone_number="worker_no_phone_999"
+        )
+        # Create an anonymous walk-in sale on debt (no client, no car, no service)
+        unrelated_sale = Sale.objects.create(
+            user=self.cashier,
+            client=None,
+            car=None,
+            payment_type=self.payment_method,
+            total_amount=80000.0,
+            paid_amount=0.0,
+            debt_amount=80000.0
+        )
+        SaleItem.objects.create(
+            sale=unrelated_sale,
+            product=self.part,
+            quantity=1,
+            price=80000.0,
+            total=80000.0,
+            total_cost=50000.0
+        )
+
+        # Worker balances should NOT include this debt!
+        balances = get_worker_open_debts_and_balances(worker_no_phone)
+        self.assertEqual(float(balances['goods_debt_balance']), 0.0)
+        self.assertEqual(float(balances['total_unpaid_debt']), 0.0)
+        self.assertEqual(len(balances['open_debts']), 0)
+
+        # Also verify via API worker-tabs endpoint
+        res = self.client.get(f'/api/worker-tabs/{worker_no_phone.id}/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['summary']['goods_debt_balance'], 0.0)
+        self.assertEqual(res.data['summary']['total_unpaid_debt'], 0.0)
+        self.assertEqual(len(res.data['goods_sales']), 0)
 
 
 class OrganizationTabTests(TestCase):

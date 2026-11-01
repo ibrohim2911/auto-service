@@ -1,11 +1,12 @@
 import os
 import sys
 import io
+import re
 import base64
 import socket
 import logging
 import html
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
 from django.conf import settings
 from django.utils import timezone
 from .models import PrinterSetting, Product, Sale
@@ -450,9 +451,14 @@ def _justify(left_text: str, right_text: str, width: int = 42) -> str:
 def _get_font(size: int, bold: bool = False):
     """Loads system TrueType font for crystal-clear thermal raster printing."""
     font_paths = [
+        # Windows Fonts
         'C:/Windows/Fonts/arialbd.ttf' if bold else 'C:/Windows/Fonts/arial.ttf',
         'C:/Windows/Fonts/segoeuib.ttf' if bold else 'C:/Windows/Fonts/segoeui.ttf',
         'C:/Windows/Fonts/tahomabd.ttf' if bold else 'C:/Windows/Fonts/tahoma.ttf',
+        # Linux Fonts
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf' if bold else '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf' if bold else '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+        '/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf' if bold else '/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf',
     ]
     for p in font_paths:
         if os.path.exists(p):
@@ -1387,32 +1393,87 @@ def encode_code128_b(text: str) -> str:
     return "".join(CODE128_PATTERNS[idx] for idx in pattern_indices)
 
 
-def render_barcode_label_image(product: Product, setting: Optional[PrinterSetting] = None, barcode_val: Optional[str] = None) -> Image.Image:
+def _resolve_artikuls(product: Product, barcode_val: Optional[str] = None, artikuls: Optional[Union[str, List[str]]] = None) -> List[str]:
     """
-    Renders a pixel-perfect barcode label at 203 DPI (8 dots/mm):
-    - Uses EAN-13 for 12/13-digit numbers (matching retail standard and Easy Trade)
-    - Uses EAN-8 for 7/8-digit numbers
-    - Uses Code 128 for alphanumeric codes with generous quiet zones
+    Resolves artikuls list to print at the bottom of the barcode sticker.
+    Allows user to add/specify custom artikuls, or falls back to any secondary
+    artikul parts stored in product.barcode.
+    """
+    clean_items: List[str] = []
+    if artikuls:
+        if isinstance(artikuls, (list, tuple)):
+            for a in artikuls:
+                s = str(a).strip()
+                if s and s not in clean_items:
+                    clean_items.append(s)
+        else:
+            parts = re.split(r'[,;\n\r]+', str(artikuls))
+            for p in parts:
+                s = p.strip()
+                if s and s not in clean_items:
+                    clean_items.append(s)
+    elif product and product.barcode:
+        raw_parts = [p.strip() for p in str(product.barcode).split(',') if p.strip()]
+        active_bc = (barcode_val or (raw_parts[0] if raw_parts else '')).strip()
+        for p in raw_parts:
+            if p != active_bc and p not in clean_items:
+                clean_items.append(p)
+    return clean_items
+
+
+def render_barcode_label_image(product: Product, setting: Optional[PrinterSetting] = None, barcode_val: Optional[str] = None, artikuls: Optional[Union[str, List[str]]] = None) -> Image.Image:
+    """
+    Renders a pixel-perfect barcode label at 203 DPI (8 dots/mm) for standard 58x40mm paper:
+    - Product title printed BIGGER and bold (with smart 2-line wrap for long names)
+    - Auto EAN-13 / EAN-8 for retail barcodes
+    - Auto Code 128 for alphanumeric codes
     - Guard bars extend lower than data bars
-    - Human-readable numbers positioned in standard format
+    - Human-readable code centered below barcode
+    - Artikul(s) displayed cleanly at the bottom ("user can add artikul bottom of barcode as much as he wants")
     - NO price (per user requirements)
     """
-    lbl_w = setting.label_width if (setting and setting.label_width) else 50
-    lbl_h = setting.label_height if (setting and setting.label_height) else 30
+    lbl_w = setting.label_width if (setting and setting.label_width) else 58
+    lbl_h = setting.label_height if (setting and setting.label_height) else 40
     w_px = max(240, int(lbl_w * 8))
     h_px = max(160, int(lbl_h * 8))
 
     img = Image.new('RGB', (w_px, h_px), 'white')
     draw = ImageDraw.Draw(img)
 
-    f_title = _get_font(int(20 * (h_px / 240)), bold=True)
-    f_num = _get_font(int(18 * (h_px / 240)), bold=True)
+    f_title = _get_font(max(20, int(24 * min(w_px / 464, h_px / 320))), bold=True)
+    f_num = _get_font(max(16, int(18 * min(w_px / 464, h_px / 320))), bold=True)
+    f_art = _get_font(max(15, int(17 * min(w_px / 464, h_px / 320))), bold=True)
 
-    # 1. Product title
-    product_name = product.name[:35] if product.name else "Mahsulot"
-    bb_title = draw.textbbox((0, 0), product_name, font=f_title)
-    tw = bb_title[2] - bb_title[0]
-    draw.text((max(10, (w_px - tw) // 2), 8), product_name, fill='black', font=f_title)
+    # 1. Product title (Bigger font, 1 or 2 lines)
+    product_name = (product.name or "Mahsulot").strip()
+    words = product_name.split()
+    title_lines = []
+    cur_line = []
+    for w in words:
+        test_l = ' '.join(cur_line + [w])
+        bb = draw.textbbox((0, 0), test_l, font=f_title)
+        if (bb[2] - bb[0]) <= (w_px - 20):
+            cur_line.append(w)
+        else:
+            if cur_line:
+                title_lines.append(' '.join(cur_line))
+                cur_line = [w]
+            else:
+                title_lines.append(w)
+                cur_line = []
+        if len(title_lines) >= 2:
+            break
+    if cur_line and len(title_lines) < 2:
+        title_lines.append(' '.join(cur_line))
+    if not title_lines:
+        title_lines = [product_name[:30]]
+
+    top_y = 6
+    for tl in title_lines[:2]:
+        bb = draw.textbbox((0, 0), tl, font=f_title)
+        tw = bb[2] - bb[0]
+        draw.text((max(10, (w_px - tw) // 2), top_y), tl, fill='black', font=f_title)
+        top_y += (bb[3] - bb[1] if bb[3] > bb[1] else 24) + 4
 
     # 2. Barcode resolution
     if not barcode_val:
@@ -1421,17 +1482,28 @@ def render_barcode_label_image(product: Product, setting: Optional[PrinterSettin
     else:
         barcode_val = str(barcode_val).strip()
 
+    art_list = _resolve_artikuls(product, barcode_val=barcode_val, artikuls=artikuls)
+    has_artikuls = len(art_list) > 0
+
     ean13_res = encode_ean13(barcode_val)
     ean8_res = encode_ean8(barcode_val) if not ean13_res else None
+
+    # Available height budgeting
+    bc_y = top_y + 4
+    if has_artikuls:
+        data_h = max(55, min(92, h_px - bc_y - 105))
+        guard_h = data_h + 12
+    else:
+        data_h = max(70, min(120, h_px - bc_y - 65))
+        guard_h = data_h + 14
+
+    num_y = bc_y + data_h + 3
 
     if ean13_res:
         digits, modules = ean13_res
         bar_w = 3 if (len(modules) * 3 <= w_px - 40) else 2
         bc_w = len(modules) * bar_w
         start_x = (w_px - bc_w) // 2
-        bc_y = int(44 * (h_px / 240))
-        data_h = int(100 * (h_px / 240))
-        guard_h = int(114 * (h_px / 240))
 
         x = start_x
         for bit, is_guard in modules:
@@ -1440,32 +1512,26 @@ def render_barcode_label_image(product: Product, setting: Optional[PrinterSettin
                 draw.rectangle([(x, bc_y), (x + bar_w - 1, bc_y + h)], fill='black')
             x += bar_w
 
-        # Draw EAN-13 numbers exactly like retail stickers:
-        # Digit 0 on left outside guard:
+        # Draw EAN-13 numbers
         d0 = digits[0]
         bb0 = draw.textbbox((0, 0), d0, font=f_num)
-        draw.text((start_x - 14 - (bb0[2] - bb0[0]) // 2, bc_y + data_h + 2), d0, fill='black', font=f_num)
+        draw.text((start_x - 14 - (bb0[2] - bb0[0]) // 2, num_y), d0, fill='black', font=f_num)
 
-        # Left 6 digits centered between start guard and center guard:
         left_center_x = start_x + int((3 + 21) * bar_w)
         d_left = " ".join(list(digits[1:7]))
         bb_l = draw.textbbox((0, 0), d_left, font=f_num)
-        draw.text((left_center_x - (bb_l[2] - bb_l[0]) // 2, bc_y + data_h + 2), d_left, fill='black', font=f_num)
+        draw.text((left_center_x - (bb_l[2] - bb_l[0]) // 2, num_y), d_left, fill='black', font=f_num)
 
-        # Right 6 digits centered between center guard and end guard:
         right_center_x = start_x + int((3 + 42 + 5 + 21) * bar_w)
         d_right = " ".join(list(digits[7:13]))
         bb_r = draw.textbbox((0, 0), d_right, font=f_num)
-        draw.text((right_center_x - (bb_r[2] - bb_r[0]) // 2, bc_y + data_h + 2), d_right, fill='black', font=f_num)
+        draw.text((right_center_x - (bb_r[2] - bb_r[0]) // 2, num_y), d_right, fill='black', font=f_num)
 
     elif ean8_res:
         digits, modules = ean8_res
         bar_w = 4 if (len(modules) * 4 <= w_px - 40) else 3
         bc_w = len(modules) * bar_w
         start_x = (w_px - bc_w) // 2
-        bc_y = int(44 * (h_px / 240))
-        data_h = int(100 * (h_px / 240))
-        guard_h = int(114 * (h_px / 240))
 
         x = start_x
         for bit, is_guard in modules:
@@ -1474,56 +1540,118 @@ def render_barcode_label_image(product: Product, setting: Optional[PrinterSettin
                 draw.rectangle([(x, bc_y), (x + bar_w - 1, bc_y + h)], fill='black')
             x += bar_w
 
-        # Left 4 digits:
         left_center_x = start_x + int((3 + 14) * bar_w)
         d_left = " ".join(list(digits[:4]))
         bb_l = draw.textbbox((0, 0), d_left, font=f_num)
-        draw.text((left_center_x - (bb_l[2] - bb_l[0]) // 2, bc_y + data_h + 2), d_left, fill='black', font=f_num)
+        draw.text((left_center_x - (bb_l[2] - bb_l[0]) // 2, num_y), d_left, fill='black', font=f_num)
 
-        # Right 4 digits:
         right_center_x = start_x + int((3 + 28 + 5 + 14) * bar_w)
         d_right = " ".join(list(digits[4:]))
         bb_r = draw.textbbox((0, 0), d_right, font=f_num)
-        draw.text((right_center_x - (bb_r[2] - bb_r[0]) // 2, bc_y + data_h + 2), d_right, fill='black', font=f_num)
+        draw.text((right_center_x - (bb_r[2] - bb_r[0]) // 2, num_y), d_right, fill='black', font=f_num)
 
     else:
-        # Code 128 for alphanumeric with generous quiet zones
         pattern = encode_code128_b(barcode_val)
         bar_w = 2 if (len(pattern) * 2 <= (w_px - 40)) else 1
         bc_w = len(pattern) * bar_w
         start_x = max(20, (w_px - bc_w) // 2)
-        bc_y = int(46 * (h_px / 240))
-        bc_h = int(100 * (h_px / 240))
 
         x = start_x
         for bit in pattern:
             if bit == '1':
-                draw.rectangle([(x, bc_y), (x + bar_w - 1, bc_y + bc_h)], fill='black')
+                draw.rectangle([(x, bc_y), (x + bar_w - 1, bc_y + data_h)], fill='black')
             x += bar_w
 
         bb_code = draw.textbbox((0, 0), barcode_val, font=f_num)
         cw = bb_code[2] - bb_code[0]
-        draw.text((max(10, (w_px - cw) // 2), bc_y + bc_h + 8), barcode_val, fill='black', font=f_num)
+        draw.text((max(10, (w_px - cw) // 2), num_y), barcode_val, fill='black', font=f_num)
+
+    # 3. Bottom Artikul(s)
+    if has_artikuls:
+        art_y = num_y + 24
+        art_prefix = "Artikul: " if len(art_list) == 1 else "Art: "
+        art_text = art_prefix + ", ".join(art_list)
+
+        bb_a = draw.textbbox((0, 0), art_text, font=f_art)
+        if (bb_a[2] - bb_a[0]) <= (w_px - 20):
+            draw.text((max(10, (w_px - (bb_a[2] - bb_a[0])) // 2), art_y), art_text, fill='black', font=f_art)
+        else:
+            words_a = art_text.split()
+            a_lines = []
+            cur_a = []
+            for w in words_a:
+                test_a = ' '.join(cur_a + [w])
+                bb_w = draw.textbbox((0, 0), test_a, font=f_art)
+                if (bb_w[2] - bb_w[0]) <= (w_px - 20):
+                    cur_a.append(w)
+                else:
+                    if cur_a:
+                        a_lines.append(' '.join(cur_a))
+                        cur_a = [w]
+                    else:
+                        a_lines.append(w)
+                        cur_a = []
+            if cur_a:
+                a_lines.append(' '.join(cur_a))
+            for al in a_lines[:2]:
+                bb_al = draw.textbbox((0, 0), al, font=f_art)
+                draw.text((max(10, (w_px - (bb_al[2] - bb_al[0])) // 2), art_y), al, fill='black', font=f_art)
+                art_y += 20
 
     return img
 
 
-def render_barcode_label_svg(product: Product, setting: Optional[PrinterSetting] = None, barcode_val: Optional[str] = None) -> str:
+def render_barcode_label_svg(product: Product, setting: Optional[PrinterSetting] = None, barcode_val: Optional[str] = None, artikuls: Optional[Union[str, List[str]]] = None) -> str:
     """
-    Renders pure vector SVG barcode label (50mm x 30mm standard):
-    - Auto EAN-13 / EAN-8 for retail numeric barcodes (scans on 100% of handheld scanners)
-    - Auto Code 128 for alphanumeric/artikul codes with generous quiet zones
-    - shape-rendering="crispEdges" for pure razor-sharp printing
+    Renders pure vector SVG barcode label for standard 58x40mm paper:
+    - Product title printed BIGGER and bold
+    - Auto EAN-13 / EAN-8 for retail barcodes
+    - Auto Code 128 for alphanumeric codes
+    - Guard bars extend lower than data bars
+    - Human-readable code centered below barcode
+    - Artikul(s) displayed cleanly at the bottom ("user can add artikul bottom of barcode as much as he wants")
     - NO price (per user requirements)
     """
-    lbl_w = setting.label_width if (setting and setting.label_width) else 50
-    lbl_h = setting.label_height if (setting and setting.label_height) else 30
-    
+    lbl_w = setting.label_width if (setting and setting.label_width) else 58
+    lbl_h = setting.label_height if (setting and setting.label_height) else 40
+
     vw = int(lbl_w * 8)
     vh = int(lbl_h * 8)
 
-    product_name = product.name[:35] if product.name else "Mahsulot"
-    clean_name = html.escape(product_name.strip())
+    product_name = (product.name or "Mahsulot").strip()
+    clean_name = html.escape(product_name)
+
+    # 1. Product title wrapping (split into 2 lines if > 22 chars)
+    words = clean_name.split()
+    title_lines = []
+    cur_line = []
+    for w in words:
+        test_l = ' '.join(cur_line + [w])
+        if len(test_l) <= 22:
+            cur_line.append(w)
+        else:
+            if cur_line:
+                title_lines.append(' '.join(cur_line))
+                cur_line = [w]
+            else:
+                title_lines.append(w)
+                cur_line = []
+        if len(title_lines) >= 2:
+            break
+    if cur_line and len(title_lines) < 2:
+        title_lines.append(' '.join(cur_line))
+    if not title_lines:
+        title_lines = [clean_name[:30]]
+
+    if len(title_lines) == 1:
+        title_svg = f'<text x="{vw // 2}" y="32" class="lbl-title">{title_lines[0]}</text>'
+        bc_y = 50
+    else:
+        title_svg = (
+            f'<text x="{vw // 2}" y="24" class="lbl-title">{title_lines[0]}</text>\n'
+            f'  <text x="{vw // 2}" y="50" class="lbl-title">{title_lines[1]}</text>'
+        )
+        bc_y = 68
 
     if not barcode_val:
         raw = str(product.barcode if product.barcode else str(product.id).zfill(8)).strip()
@@ -1532,17 +1660,57 @@ def render_barcode_label_svg(product: Product, setting: Optional[PrinterSetting]
         barcode_val = str(barcode_val).strip()
 
     clean_bc = html.escape(barcode_val)
+    art_list = _resolve_artikuls(product, barcode_val=barcode_val, artikuls=artikuls)
+    has_artikuls = len(art_list) > 0
+
     ean13_res = encode_ean13(barcode_val)
     ean8_res = encode_ean8(barcode_val) if not ean13_res else None
+
+    if has_artikuls:
+        data_h = max(55, min(92, vh - bc_y - 105))
+        guard_h = data_h + 12
+    else:
+        data_h = max(70, min(120, vh - bc_y - 65))
+        guard_h = data_h + 14
+
+    text_y = bc_y + data_h + 18
+
+    # Artikul SVG lines
+    artikul_svg = ""
+    if has_artikuls:
+        art_prefix = "Artikul: " if len(art_list) == 1 else "Art: "
+        full_art = html.escape(art_prefix + ", ".join(art_list))
+        if len(full_art) <= 30:
+            artikul_svg = f'<text x="{vw // 2}" y="{text_y + 26}" class="lbl-artikul">{full_art}</text>'
+        else:
+            words_a = full_art.split()
+            a_lines = []
+            cur_a = []
+            for w in words_a:
+                test_a = ' '.join(cur_a + [w])
+                if len(test_a) <= 30:
+                    cur_a.append(w)
+                else:
+                    if cur_a:
+                        a_lines.append(' '.join(cur_a))
+                        cur_a = [w]
+                    else:
+                        a_lines.append(w)
+                        cur_a = []
+            if cur_a:
+                a_lines.append(' '.join(cur_a))
+            art_y = text_y + 24
+            art_tags = []
+            for al in a_lines[:2]:
+                art_tags.append(f'<text x="{vw // 2}" y="{art_y}" class="lbl-artikul">{al}</text>')
+                art_y += 22
+            artikul_svg = "\n  ".join(art_tags)
 
     if ean13_res:
         digits, modules = ean13_res
         bar_w = 3 if (len(modules) * 3 <= vw - 40) else 2
         bc_w = len(modules) * bar_w
         start_x = (vw - bc_w) // 2
-        bc_y = int(44 * (vh / 240))
-        data_h = int(100 * (vh / 240))
-        guard_h = int(114 * (vh / 240))
 
         rects = []
         i = 0
@@ -1567,21 +1735,22 @@ def render_barcode_label_svg(product: Product, setting: Optional[PrinterSetting]
         rects_svg = "\n    ".join(rects)
         left_center_x = start_x + int((3 + 21) * bar_w)
         right_center_x = start_x + int((3 + 42 + 5 + 21) * bar_w)
-        text_y = bc_y + data_h + 16
 
         svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {vw} {vh}" width="{lbl_w}mm" height="{lbl_h}mm" style="background:#ffffff;shape-rendering:crispEdges;display:block;margin:0 auto;">
   <style>
-    .lbl-title {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; font-size: 19px; font-weight: bold; text-anchor: middle; fill: #000000; }}
-    .lbl-digit-lead {{ font-family: "Consolas", "Courier New", monospace, Arial; font-size: 18px; font-weight: bold; text-anchor: middle; fill: #000000; }}
-    .lbl-digits {{ font-family: "Consolas", "Courier New", monospace, Arial; font-size: 18px; font-weight: bold; text-anchor: middle; letter-spacing: 1.5px; fill: #000000; }}
+    .lbl-title {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; font-size: 25px; font-weight: 800; text-anchor: middle; fill: #000000; }}
+    .lbl-digit-lead {{ font-family: "Consolas", "Courier New", monospace, Arial; font-size: 19px; font-weight: bold; text-anchor: middle; fill: #000000; }}
+    .lbl-digits {{ font-family: "Consolas", "Courier New", monospace, Arial; font-size: 19px; font-weight: bold; text-anchor: middle; letter-spacing: 1.5px; fill: #000000; }}
+    .lbl-artikul {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Consolas", monospace, Arial; font-size: 18px; font-weight: 700; text-anchor: middle; fill: #000000; }}
   </style>
-  <text x="{vw // 2}" y="28" class="lbl-title">{clean_name}</text>
+  {title_svg}
   <g>
     {rects_svg}
   </g>
   <text x="{start_x - 14}" y="{text_y}" class="lbl-digit-lead">{digits[0]}</text>
   <text x="{left_center_x}" y="{text_y}" class="lbl-digits">{digits[1:7]}</text>
   <text x="{right_center_x}" y="{text_y}" class="lbl-digits">{digits[7:13]}</text>
+  {artikul_svg}
 </svg>"""
         return svg
 
@@ -1590,9 +1759,6 @@ def render_barcode_label_svg(product: Product, setting: Optional[PrinterSetting]
         bar_w = 4 if (len(modules) * 4 <= vw - 40) else 3
         bc_w = len(modules) * bar_w
         start_x = (vw - bc_w) // 2
-        bc_y = int(44 * (vh / 240))
-        data_h = int(100 * (vh / 240))
-        guard_h = int(114 * (vh / 240))
 
         rects = []
         i = 0
@@ -1617,30 +1783,28 @@ def render_barcode_label_svg(product: Product, setting: Optional[PrinterSetting]
         rects_svg = "\n    ".join(rects)
         left_center_x = start_x + int((3 + 14) * bar_w)
         right_center_x = start_x + int((3 + 28 + 5 + 14) * bar_w)
-        text_y = bc_y + data_h + 16
 
         svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {vw} {vh}" width="{lbl_w}mm" height="{lbl_h}mm" style="background:#ffffff;shape-rendering:crispEdges;display:block;margin:0 auto;">
   <style>
-    .lbl-title {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; font-size: 19px; font-weight: bold; text-anchor: middle; fill: #000000; }}
-    .lbl-digits {{ font-family: "Consolas", "Courier New", monospace, Arial; font-size: 18px; font-weight: bold; text-anchor: middle; letter-spacing: 2px; fill: #000000; }}
+    .lbl-title {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; font-size: 25px; font-weight: 800; text-anchor: middle; fill: #000000; }}
+    .lbl-digits {{ font-family: "Consolas", "Courier New", monospace, Arial; font-size: 19px; font-weight: bold; text-anchor: middle; letter-spacing: 2px; fill: #000000; }}
+    .lbl-artikul {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Consolas", monospace, Arial; font-size: 18px; font-weight: 700; text-anchor: middle; fill: #000000; }}
   </style>
-  <text x="{vw // 2}" y="28" class="lbl-title">{clean_name}</text>
+  {title_svg}
   <g>
     {rects_svg}
   </g>
   <text x="{left_center_x}" y="{text_y}" class="lbl-digits">{digits[:4]}</text>
   <text x="{right_center_x}" y="{text_y}" class="lbl-digits">{digits[4:]}</text>
+  {artikul_svg}
 </svg>"""
         return svg
 
     else:
-        # Code 128 for alphanumeric
         pattern = encode_code128_b(barcode_val)
         bar_w = 2 if (len(pattern) * 2 <= (vw - 40)) else 1
         bc_w = len(pattern) * bar_w
         start_x = max(20, (vw - bc_w) // 2)
-        bc_y = int(46 * (vh / 240))
-        bc_h = int(112 * (vh / 240))
 
         rects = []
         i = 0
@@ -1652,7 +1816,7 @@ def render_barcode_label_svg(product: Product, setting: Optional[PrinterSetting]
                     i += 1
                 run_len = i - start_i
                 w = run_len * bar_w
-                rects.append(f'<rect x="{x}" y="{bc_y}" width="{w}" height="{bc_h}" fill="#000000" />')
+                rects.append(f'<rect x="{x}" y="{bc_y}" width="{w}" height="{data_h}" fill="#000000" />')
                 x += w
             else:
                 start_i = i
@@ -1661,39 +1825,42 @@ def render_barcode_label_svg(product: Product, setting: Optional[PrinterSetting]
                 x += (i - start_i) * bar_w
 
         rects_svg = "\n    ".join(rects)
-        text_y = bc_y + bc_h + 22
 
         svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {vw} {vh}" width="{lbl_w}mm" height="{lbl_h}mm" style="background:#ffffff;shape-rendering:crispEdges;display:block;margin:0 auto;">
   <style>
-    .lbl-title {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; font-size: 19px; font-weight: bold; text-anchor: middle; fill: #000000; }}
+    .lbl-title {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; font-size: 25px; font-weight: 800; text-anchor: middle; fill: #000000; }}
     .lbl-code {{ font-family: "Consolas", "Courier New", monospace, Arial; font-size: 20px; font-weight: bold; text-anchor: middle; fill: #000000; }}
+    .lbl-artikul {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Consolas", monospace, Arial; font-size: 18px; font-weight: 700; text-anchor: middle; fill: #000000; }}
   </style>
-  <text x="{vw // 2}" y="28" class="lbl-title">{clean_name}</text>
+  {title_svg}
   <g>
     {rects_svg}
   </g>
   <text x="{vw // 2}" y="{text_y}" class="lbl-code">{clean_bc}</text>
+  {artikul_svg}
 </svg>"""
         return svg
 
 
-def format_barcode_labels(product: Product, quantity: int = 1, setting: Optional[PrinterSetting] = None, barcode_val: Optional[str] = None) -> bytes:
+def format_barcode_labels(product: Product, quantity: int = 1, setting: Optional[PrinterSetting] = None, barcode_val: Optional[str] = None, artikuls: Optional[Union[str, List[str]]] = None) -> bytes:
     """
-    Generates thermal barcode label print commands without price.
+    Generates thermal barcode label print commands without price for 58x40 paper.
     Uses hardware EAN-13 / EAN-8 for numeric barcodes, and Code 128 for others.
+    Product name printed bigger, and artikul(s) included at the bottom.
     """
     quantity = max(1, int(quantity))
     cmd_type = setting.command_type if setting else 'TSPL'
-    lbl_w = setting.label_width if setting else 50
-    lbl_h = setting.label_height if setting else 30
+    lbl_w = setting.label_width if setting else 58
+    lbl_h = setting.label_height if setting else 40
 
-    product_name = product.name[:30] if product.name else "Mahsulot"
+    product_name = product.name[:45] if product.name else "Mahsulot"
     if not barcode_val:
         raw = str(product.barcode if product.barcode else str(product.id).zfill(8)).strip()
         barcode_val = raw.split(',')[0].strip()
     else:
         barcode_val = str(barcode_val).strip()
 
+    art_list = _resolve_artikuls(product, barcode_val=barcode_val, artikuls=artikuls)
     ean13_res = encode_ean13(barcode_val)
     ean8_res = encode_ean8(barcode_val) if not ean13_res else None
 
@@ -1702,7 +1869,7 @@ def format_barcode_labels(product: Product, quantity: int = 1, setting: Optional
         h_dots = int(lbl_h * 8)
 
         clean_name = product_name.replace('"', '').replace("'", "").strip()
-        chars_per_line = max(10, (w_dots - 20) // 12)
+        chars_per_line = max(10, (w_dots - 20) // 16)
         if len(clean_name) > chars_per_line:
             line1 = clean_name[:chars_per_line]
             line2 = clean_name[chars_per_line:chars_per_line * 2]
@@ -1710,18 +1877,19 @@ def format_barcode_labels(product: Product, quantity: int = 1, setting: Optional
             line1 = clean_name
             line2 = ""
 
-        name1_x = max(10, (w_dots - (len(line1) * 12)) // 2)
+        name1_x = max(10, (w_dots - (len(line1) * 16)) // 2)
         name1_y = 12
 
         name2_lines = ""
-        curr_y = name1_y + 22
+        curr_y = name1_y + 28
         if line2:
-            name2_x = max(10, (w_dots - (len(line2) * 12)) // 2)
-            name2_lines = f'TEXT {name2_x}, {curr_y}, "2", 0, 1, 1, "{line2}"\r\n'
-            curr_y += 22
+            name2_x = max(10, (w_dots - (len(line2) * 16)) // 2)
+            name2_lines = f'TEXT {name2_x}, {curr_y}, "3", 0, 1, 1, "{line2}"\r\n'
+            curr_y += 28
 
         bc_y = curr_y + 8
-        bc_h = max(50, min(95, h_dots - curr_y - 45))
+        has_art = len(art_list) > 0
+        bc_h = max(50, min(95 if has_art else 125, h_dots - curr_y - (70 if has_art else 45)))
 
         if ean13_res:
             digits, _ = ean13_res
@@ -1744,6 +1912,14 @@ def format_barcode_labels(product: Product, quantity: int = 1, setting: Optional
             bc_x = max(10, (w_dots - bc_w) // 2)
             bc_cmd = f'BARCODE {bc_x}, {bc_y}, "128", {bc_h}, 1, 0, {narrow}, {wide}, "{clean_barcode}"\r\n'
 
+        artikul_cmd = ""
+        if has_art:
+            art_prefix = "Artikul: " if len(art_list) == 1 else "Art: "
+            art_line = (art_prefix + ", ".join(art_list)).replace('"', '')[:35]
+            art_x = max(10, (w_dots - (len(art_line) * 12)) // 2)
+            art_y = bc_y + bc_h + 30
+            artikul_cmd = f'TEXT {art_x}, {art_y}, "2", 0, 1, 1, "{art_line}"\r\n'
+
         tspl = (
             f"SIZE {lbl_w} mm, {lbl_h} mm\r\n"
             f"GAP 2 mm, 0 mm\r\n"
@@ -1754,9 +1930,10 @@ def format_barcode_labels(product: Product, quantity: int = 1, setting: Optional
             f"SET RIBBON OFF\r\n"
             f"SET PEEL OFF\r\n"
             f"CLS\r\n"
-            f"TEXT {name1_x}, {name1_y}, \"2\", 0, 1, 1, \"{line1}\"\r\n"
+            f"TEXT {name1_x}, {name1_y}, \"3\", 0, 1, 1, \"{line1}\"\r\n"
             f"{name2_lines}"
             f"{bc_cmd}"
+            f"{artikul_cmd}"
             f"PRINT {quantity}, 1\r\n"
         )
         return tspl.encode('utf-8')
@@ -1767,35 +1944,44 @@ def format_barcode_labels(product: Product, quantity: int = 1, setting: Optional
             buf.extend(ESC_INIT)
             buf.extend(ESC_ALIGN_CENTER)
             buf.extend(ESC_BOLD_ON)
+            buf.extend(ESC_DOUBLE_SIZE)
             buf.extend(f"{product_name}\n".encode('utf-8'))
+            buf.extend(ESC_NORMAL_SIZE)
             buf.extend(ESC_BOLD_OFF)
             buf.extend(b'\x1dh\x50')  # Height: 80 dots
             buf.extend(b'\x1dH\x02')  # HRI font: below barcode
 
             if ean13_res:
                 digits, _ = ean13_res
-                buf.extend(b'\x1dw\x03')  # Width: 3
+                buf.extend(b'\x1dw\x03')
                 buf.extend(b'\x1dk\x02' + digits.encode('ascii') + b'\x00')
             elif ean8_res:
                 digits, _ = ean8_res
-                buf.extend(b'\x1dw\x03')  # Width: 3
+                buf.extend(b'\x1dw\x03')
                 buf.extend(b'\x1dk\x03' + digits.encode('ascii') + b'\x00')
             else:
                 clean_barcode = str(barcode_val).strip()
                 barcode_bytes = b'{B' + clean_barcode.encode('ascii', errors='ignore')
-                buf.extend(b'\x1dw\x02')  # Width: 2
+                buf.extend(b'\x1dw\x02')
                 buf.extend(b'\x1dk\x49' + bytes([len(barcode_bytes)]) + barcode_bytes)
 
-            buf.extend(b'\n\n\x1d\x56\x41\x05')  # Cut / feed
+            if art_list:
+                art_prefix = "Artikul: " if len(art_list) == 1 else "Art: "
+                art_str = f"\n{art_prefix}" + ", ".join(art_list) + "\n"
+                buf.extend(art_str.encode('utf-8'))
+
+            buf.extend(b'\n\n\x1d\x56\x41\x05')
         return bytes(buf)
 
     else:
         buf = bytearray()
         for i in range(1, quantity + 1):
+            art_info = f"Artikul: {', '.join(art_list)}\n" if art_list else ""
             text_label = (
                 f"{'='*30}\n"
                 f"Mahsulot: {product_name}\n"
                 f"Chiziqli belgi: {barcode_val}\n"
+                f"{art_info}"
                 f"[Etiketka {i}/{quantity}]\n"
                 f"{'='*30}\n\n"
             )
@@ -1836,7 +2022,7 @@ def print_sale_tickets(sale: Sale, target: str = 'both') -> dict:
     return results
 
 
-def print_product_barcode(product_id: int, quantity: int = 1, barcode_val: Optional[str] = None) -> Tuple[bool, str]:
+def print_product_barcode(product_id: int, quantity: int = 1, barcode_val: Optional[str] = None, artikuls: Optional[Union[str, List[str]]] = None) -> Tuple[bool, str]:
     """
     Prints barcode labels for a product directly to the configured barcode printer.
     Quantity is dynamic and NOT hardcoded.
@@ -1866,7 +2052,7 @@ def print_product_barcode(product_id: int, quantity: int = 1, barcode_val: Optio
             return False, "Windows printeri tanlanmagan. Sozlamalardan printerni tanlang."
         if HAS_PIL:
             try:
-                img = render_barcode_label_image(product, setting=barcode_setting, barcode_val=barcode_val)
+                img = render_barcode_label_image(product, setting=barcode_setting, barcode_val=barcode_val, artikuls=artikuls)
                 return print_image_to_windows_gdi(
                     barcode_setting.printer_name,
                     f"Barcode_{product.id}",
@@ -1878,11 +2064,11 @@ def print_product_barcode(product_id: int, quantity: int = 1, barcode_val: Optio
             except Exception as e:
                 logger.warning(f"Barcode GDI render failed, falling back to spooler: {e}")
 
-    raw_data = format_barcode_labels(product, quantity=quantity, setting=barcode_setting, barcode_val=barcode_val)
+    raw_data = format_barcode_labels(product, quantity=quantity, setting=barcode_setting, barcode_val=barcode_val, artikuls=artikuls)
     return send_raw_to_printer(barcode_setting, raw_data, f"Barcode_{product.id}_qty{quantity}")
 
 
-def get_barcode_label_b64(product_id: int, barcode_val: Optional[str] = None) -> Optional[str]:
+def get_barcode_label_b64(product_id: int, barcode_val: Optional[str] = None, artikuls: Optional[Union[str, List[str]]] = None) -> Optional[str]:
     """
     Renders pixel-perfect barcode label image and returns data URL (base64)
     for preview and Windows/Browser direct printing.
@@ -1893,13 +2079,13 @@ def get_barcode_label_b64(product_id: int, barcode_val: Optional[str] = None) ->
         return None
 
     barcode_setting = PrinterSetting.objects.filter(printer_type='BARCODE').first()
-    img = render_barcode_label_image(product, setting=barcode_setting, barcode_val=barcode_val)
+    img = render_barcode_label_image(product, setting=barcode_setting, barcode_val=barcode_val, artikuls=artikuls)
     buf = io.BytesIO()
     img.save(buf, format='PNG')
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode('ascii')
 
 
-def get_barcode_label_svg(product_id: int, barcode_val: Optional[str] = None) -> Optional[str]:
+def get_barcode_label_svg(product_id: int, barcode_val: Optional[str] = None, artikuls: Optional[Union[str, List[str]]] = None) -> Optional[str]:
     """
     Returns the pure vector SVG string for direct razor-sharp browser and Windows printing.
     Zero raster dithering/antialiasing blur, 100% crisp solid black bars, and NO price.
@@ -1910,7 +2096,7 @@ def get_barcode_label_svg(product_id: int, barcode_val: Optional[str] = None) ->
         return None
 
     barcode_setting = PrinterSetting.objects.filter(printer_type='BARCODE').first()
-    return render_barcode_label_svg(product, setting=barcode_setting, barcode_val=barcode_val)
+    return render_barcode_label_svg(product, setting=barcode_setting, barcode_val=barcode_val, artikuls=artikuls)
 
 
 def execute_test_print(printer_type: str) -> Tuple[bool, str]:

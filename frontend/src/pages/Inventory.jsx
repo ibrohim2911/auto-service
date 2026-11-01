@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Package, Plus, Trash2, Edit, AlertCircle, X, Box, AlertTriangle, Layers, Search, Filter, Printer, Minus, Tag, ArrowRightLeft, ArrowRight, PackagePlus } from 'lucide-react';
+import { Package, Plus, Trash2, Edit, AlertCircle, X, Box, AlertTriangle, Layers, Search, Filter, Printer, Minus, Tag, ArrowRightLeft, ArrowRight, PackagePlus, Sparkles } from 'lucide-react';
 import toast from 'react-hot-toast';
 import api from '../api';
 import SearchableSelect from '../components/SearchableSelect';
@@ -34,7 +34,12 @@ function Inventory() {
   const [barcodeModalProduct, setBarcodeModalProduct] = useState(null);
   const [barcodePrintQty, setBarcodePrintQty] = useState(1);
   const [selectedBarcode, setSelectedBarcode] = useState('');
+  const [barcodeArtikuls, setBarcodeArtikuls] = useState([]);
+  const [newArtikulInput, setNewArtikulInput] = useState('');
+  const [barcodePreviewSvg, setBarcodePreviewSvg] = useState('');
+  const [isPreviewLoading, setIsPreviewLoading] = useState(false);
   const [isPrintingBarcode, setIsPrintingBarcode] = useState(false);
+  const [isGeneratingBarcode, setIsGeneratingBarcode] = useState(false);
 
   // Stock Transfer States
   const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
@@ -87,19 +92,19 @@ function Inventory() {
           <title></title>
           <style>
             @page {
-              size: 50mm 30mm;
+              size: 58mm 40mm;
               margin: 0 !important;
             }
             @media print {
               @page {
-                size: 50mm 30mm;
+                size: 58mm 40mm;
                 margin: 0 !important;
               }
               html, body {
                 margin: 0 !important;
                 padding: 0 !important;
-                width: 50mm !important;
-                height: 30mm !important;
+                width: 58mm !important;
+                height: 40mm !important;
                 overflow: hidden !important;
                 background: #ffffff !important;
                 -webkit-print-color-adjust: exact !important;
@@ -113,12 +118,12 @@ function Inventory() {
               margin: 0;
               padding: 0;
               background: #fff;
-              width: 50mm;
-              height: 30mm;
+              width: 58mm;
+              height: 40mm;
             }
             .label-page {
-              width: 50mm;
-              height: 30mm;
+              width: 58mm;
+              height: 40mm;
               page-break-after: always;
               break-after: page;
               display: flex;
@@ -134,8 +139,8 @@ function Inventory() {
               break-after: auto;
             }
             svg {
-              width: 50mm;
-              height: 30mm;
+              width: 58mm;
+              height: 40mm;
               display: block;
               shape-rendering: crispEdges;
             }
@@ -178,8 +183,55 @@ function Inventory() {
       .split(',')
       .map(s => s.trim())
       .filter(Boolean);
-    setSelectedBarcode(parts.length > 0 ? parts[0] : (p.barcode || ''));
+    const chosen = parts.length > 0 ? parts[0] : (p.barcode || '');
+    setSelectedBarcode(chosen);
+    // Any secondary parts are default artikuls
+    const initialArtikuls = parts.filter(pt => pt !== chosen);
+    setBarcodeArtikuls(initialArtikuls);
+    setNewArtikulInput('');
+    setBarcodePreviewSvg('');
   };
+
+  const handleAddArtikul = () => {
+    const val = newArtikulInput.trim();
+    if (!val) return;
+    if (!barcodeArtikuls.includes(val)) {
+      setBarcodeArtikuls([...barcodeArtikuls, val]);
+    }
+    setNewArtikulInput('');
+  };
+
+  const handleRemoveArtikul = (indexToRemove) => {
+    setBarcodeArtikuls(barcodeArtikuls.filter((_, idx) => idx !== indexToRemove));
+  };
+
+  useEffect(() => {
+    if (!barcodeModalProduct) {
+      setBarcodePreviewSvg('');
+      return;
+    }
+    let isCurrent = true;
+    const fetchPreview = async () => {
+      setIsPreviewLoading(true);
+      try {
+        const bcToPrint = selectedBarcode || (barcodeModalProduct.barcode ? String(barcodeModalProduct.barcode).split(',')[0].trim() : '');
+        const res = await api.post('printers/barcode-preview/', {
+          product_id: barcodeModalProduct.id,
+          barcode: bcToPrint,
+          artikuls: barcodeArtikuls
+        });
+        if (isCurrent && res.data.label_svg) {
+          setBarcodePreviewSvg(res.data.label_svg);
+        }
+      } catch (e) {
+        console.error("Preview fetch error:", e);
+      } finally {
+        if (isCurrent) setIsPreviewLoading(false);
+      }
+    };
+    fetchPreview();
+    return () => { isCurrent = false; };
+  }, [barcodeModalProduct, selectedBarcode, barcodeArtikuls]);
 
   const handlePrintBarcode = async (forceBrowser = false) => {
     if (!barcodeModalProduct) return;
@@ -193,13 +245,16 @@ function Inventory() {
 
     setIsPrintingBarcode(true);
     try {
+      const payload = {
+        product_id: barcodeModalProduct.id,
+        quantity: qty,
+        barcode: bcToPrint,
+        artikuls: barcodeArtikuls,
+        skip_direct: forceBrowser
+      };
+
       if (forceBrowser) {
-        const res = await api.post('printers/print-barcode/', {
-          product_id: barcodeModalProduct.id,
-          quantity: qty,
-          barcode: bcToPrint,
-          skip_direct: true
-        });
+        const res = await api.post('printers/print-barcode/', payload);
         const labelContent = res.data.label_svg || res.data.label_image;
         if (labelContent) {
           printViaBrowser(labelContent, qty);
@@ -212,11 +267,7 @@ function Inventory() {
       }
 
       // 1. Look for direct print first (server or LAN TCP/IP)
-      const res = await api.post('printers/print-barcode/', {
-        product_id: barcodeModalProduct.id,
-        quantity: qty,
-        barcode: bcToPrint
-      });
+      const res = await api.post('printers/print-barcode/', payload);
 
       if (res.data.success) {
         toast.success(res.data.detail || `${qty} dona chiziqli belgi printerga yuborildi!`);
@@ -448,6 +499,62 @@ function Inventory() {
       });
     } else {
       setFormData(item);
+    }
+    setIsModalOpen(true);
+  };
+
+  const handleGenerateEan13 = async (forNewForm = false) => {
+    setIsGeneratingBarcode(true);
+    try {
+      const res = await api.get('products/generate-barcode/');
+      const newBarcode = res.data.barcode;
+      if (forNewForm) {
+        setFormData(prev => ({ ...prev, barcode: newBarcode }));
+      } else {
+        setFormData(prev => {
+          const curr = (prev.barcode || '').trim();
+          if (!curr) return { ...prev, barcode: newBarcode };
+          const parts = curr.split(',').map(s => s.trim()).filter(Boolean);
+          if (parts.length > 0) {
+            const remaining = parts.slice(1);
+            return { ...prev, barcode: [newBarcode, ...remaining].join(', ') };
+          }
+          return { ...prev, barcode: newBarcode };
+        });
+        toast.success(`Yangi EAN-13 shtrix-kod: ${newBarcode}`);
+      }
+    } catch (e) {
+      // Offline fallback EAN-13 generation
+      const randDigits = String(Date.now()).slice(-9);
+      const base12 = ('200' + randDigits).slice(0, 12).padStart(12, '0');
+      const sum = base12.split('').reduce((acc, d, i) => acc + parseInt(d, 10) * (i % 2 === 0 ? 1 : 3), 0);
+      const chk = String((10 - (sum % 10)) % 10);
+      const fallbackBc = base12 + chk;
+      if (forNewForm) {
+        setFormData(prev => ({ ...prev, barcode: fallbackBc }));
+      } else {
+        setFormData(prev => {
+          const curr = (prev.barcode || '').trim();
+          if (!curr) return { ...prev, barcode: fallbackBc };
+          const parts = curr.split(',').map(s => s.trim()).filter(Boolean);
+          if (parts.length > 0) {
+            return { ...prev, barcode: [fallbackBc, ...parts.slice(1)].join(', ') };
+          }
+          return { ...prev, barcode: fallbackBc };
+        });
+        toast.success(`EAN-13 shtrix-kod yaratildi: ${fallbackBc}`);
+      }
+    } finally {
+      setIsGeneratingBarcode(false);
+    }
+  };
+
+  const openAddModal = () => {
+    setEditingItem(null);
+    setFormData({});
+    setFormErrors({});
+    if (activeTab === 'products') {
+      handleGenerateEan13(true);
     }
     setIsModalOpen(true);
   };
@@ -690,7 +797,7 @@ function Inventory() {
               if (activeTab === 'transfers') {
                 openTransferModal();
               } else {
-                setIsModalOpen(true);
+                openAddModal();
               }
             }}
             style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
@@ -1474,8 +1581,48 @@ function Inventory() {
 
                   <div style={{ display: 'flex', gap: '16px', marginBottom: '24px' }}>
                     <div className="input-group" style={{ flex: 1, marginBottom: 0 }}>
-                      <label>Chiziqli belgi (Ixtiyoriy)</label>
-                      <input type="text" name="barcode" value={formData.barcode || ''} onChange={handleInputChange} className="input-field" placeholder="Chiziqli belgini o'qitish..." />
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                        <label style={{ marginBottom: 0 }}>Chiziqli belgi / Shtrix-kod & Artikullar</label>
+                        <span style={{ fontSize: '0.75rem', color: 'var(--primary)', fontWeight: 600, backgroundColor: 'rgba(67, 97, 238, 0.1)', padding: '2px 8px', borderRadius: '4px' }}>
+                          EAN-13 (13 xonali)
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        <input 
+                          type="text" 
+                          name="barcode" 
+                          value={formData.barcode || ''} 
+                          onChange={handleInputChange} 
+                          className="input-field" 
+                          placeholder="Shtrix-kod (EAN-13) yoki skanerlang..." 
+                          style={{ flex: 1, marginBottom: 0 }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleGenerateEan13(false)}
+                          disabled={isGeneratingBarcode}
+                          className="btn btn-secondary"
+                          style={{
+                            height: '42px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            whiteSpace: 'nowrap',
+                            padding: '0 12px',
+                            fontSize: '0.85rem',
+                            fontWeight: 600,
+                            color: 'var(--primary)',
+                            borderColor: 'var(--primary)',
+                            backgroundColor: 'rgba(67, 97, 238, 0.08)'
+                          }}
+                          title="Yangi 13 xonali EAN-13 shtrix-kod generatsiya qilish"
+                        >
+                          <Sparkles size={16} /> {isGeneratingBarcode ? 'Generatsiya...' : 'EAN-13 Generatsiya'}
+                        </button>
+                      </div>
+                      <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '4px', display: 'block' }}>
+                        Yangi 13 xonali EAN-13 yaratish uchun tugmani bosing. Bir nechta artikul qo'shish uchun vergul (,) bilan ajrating (masalan: 2000000000015, ART-01).
+                      </span>
                     </div>
                     <div className="input-group" style={{ flex: 1, marginBottom: 0 }}>
                       <label>Kam qoldiq chegarasi (Ixtiyoriy)</label>
@@ -1643,20 +1790,49 @@ function Inventory() {
                 marginBottom: '16px',
                 border: '1px solid var(--border)'
               }}>
-                <div style={{ fontWeight: 600, fontSize: '1.05rem', marginBottom: '8px', color: 'var(--text-main)' }}>
+                <div style={{ fontWeight: 700, fontSize: '1.15rem', marginBottom: '8px', color: 'var(--text-main)' }}>
                   {barcodeModalProduct.name}
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: '0.9rem', flexWrap: 'wrap', gap: '4px' }}>
-                  <span>Tanlangan kod: <strong style={{ color: 'var(--primary)', fontFamily: 'monospace', fontSize: '1rem' }}>{selectedBarcode || 'Avtomatik'}</strong></span>
-                  <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Etiketka: <strong>Narxsiz</strong></span>
+                  <span>Tanlangan shtrix-kod: <strong style={{ color: 'var(--primary)', fontFamily: 'monospace', fontSize: '1.05rem' }}>{selectedBarcode || 'Avtomatik'}</strong></span>
+                  <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Qog'oz: <strong>58x40 mm</strong></span>
                 </div>
               </div>
 
-              {/* Multiple Barcode Selection (If product has more than 1 barcode/artikul) */}
+              {/* STICKER LIVE PREVIEW (58x40mm) */}
+              <div style={{
+                backgroundColor: '#ffffff',
+                borderRadius: '12px',
+                padding: '14px',
+                marginBottom: '16px',
+                border: '1px solid var(--border)',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                minHeight: '130px',
+                boxShadow: 'inset 0 0 12px rgba(0,0,0,0.05)'
+              }}>
+                <div style={{ fontSize: '0.72rem', fontWeight: 700, color: '#888', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                  Etiketka ko'rinishi (58x40 mm qog'oz):
+                </div>
+                {isPreviewLoading && !barcodePreviewSvg ? (
+                  <div style={{ fontSize: '0.85rem', color: '#999', padding: '16px 0' }}>Namoyish yuklanmoqda...</div>
+                ) : barcodePreviewSvg ? (
+                  <div
+                    dangerouslySetInnerHTML={{ __html: barcodePreviewSvg }}
+                    style={{ width: '100%', maxWidth: '280px', display: 'flex', justifyContent: 'center' }}
+                  />
+                ) : (
+                  <div style={{ fontSize: '0.85rem', color: '#999' }}>Namoyish tayyorlanmoqda...</div>
+                )}
+              </div>
+
+              {/* Multiple Barcode Selection (If product has more than 1 barcode) */}
               {barcodeList.length > 1 && (
-                <div style={{ marginBottom: '18px' }}>
+                <div style={{ marginBottom: '16px' }}>
                   <label style={{ display: 'block', marginBottom: '8px', fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-main)' }}>
-                    Qaysi shtrix-kod chop etilsin? ({barcodeList.length} ta kod mavjud):
+                    Qaysi shtrix-kod chiziqlari bosilsin? ({barcodeList.length} ta kod mavjud):
                   </label>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                     {barcodeList.map((bc, idx) => {
@@ -1695,7 +1871,7 @@ function Inventory() {
                                 {bc}
                               </span>
                               <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginLeft: '8px' }}>
-                                {idx === 0 ? "(Asosiy shtrix-kod)" : "(Артикул / Qo'shimcha)"}
+                                {idx === 0 ? "(Asosiy shtrix-kod)" : "(Qo'shimcha artikul)"}
                               </span>
                             </div>
                           </div>
@@ -1717,6 +1893,96 @@ function Inventory() {
                   </div>
                 </div>
               )}
+
+              {/* PASTKI ARTIKULLAR (User can add as many as he wants) */}
+              <div style={{
+                backgroundColor: 'var(--surface)',
+                borderRadius: '12px',
+                padding: '14px',
+                marginBottom: '18px',
+                border: '1px solid var(--border)'
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                  <label style={{ margin: 0, fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-main)' }}>
+                    Pastki artikul(lar):
+                  </label>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                    Shtrix-kod ostiga istalgancha qo'shish mumkin
+                  </span>
+                </div>
+
+                {/* Input row to add new artikul */}
+                <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+                  <input
+                    type="text"
+                    value={newArtikulInput}
+                    onChange={e => setNewArtikulInput(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleAddArtikul();
+                      }
+                    }}
+                    placeholder="Artikul yozing (masalan: C-110, 90915)..."
+                    className="input-field"
+                    style={{ marginBottom: 0, flex: 1, height: '38px', fontSize: '0.9rem' }}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddArtikul}
+                    className="btn btn-secondary"
+                    style={{ height: '38px', display: 'flex', alignItems: 'center', gap: '4px', padding: '0 12px' }}
+                  >
+                    <Plus size={16} /> Qo'shish
+                  </button>
+                </div>
+
+                {/* Current Artikul Badges */}
+                {barcodeArtikuls.length > 0 ? (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                    {barcodeArtikuls.map((art, idx) => (
+                      <span
+                        key={idx}
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          backgroundColor: 'rgba(52, 152, 219, 0.15)',
+                          color: 'var(--primary)',
+                          borderRadius: '8px',
+                          padding: '4px 10px',
+                          fontSize: '0.85rem',
+                          fontWeight: 600,
+                          fontFamily: 'monospace',
+                          border: '1px solid rgba(52, 152, 219, 0.3)'
+                        }}
+                      >
+                        {art}
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveArtikul(idx)}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            cursor: 'pointer',
+                            color: 'var(--danger)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            padding: 0
+                          }}
+                          title="O'chirish"
+                        >
+                          <X size={14} />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                    Artikul qo'shilmagan. Yuqoridagi maydondan istalgancha artikul qo'shishingiz mumkin.
+                  </div>
+                )}
+              </div>
 
               {/* Dynamic Quantity Selector */}
               <div style={{ marginBottom: '20px' }}>

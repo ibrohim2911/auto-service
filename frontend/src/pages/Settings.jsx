@@ -228,8 +228,8 @@ function PrinterConfigCard({ printer, availablePrinters, onSave, onTest, isTesti
                 <label style={{ fontSize: '0.85rem' }}>Kengligi (mm)</label>
                 <input 
                   type="number" 
-                  value={form.label_width || 50} 
-                  onChange={e => handleChange('label_width', parseInt(e.target.value) || 50)}
+                  value={form.label_width || 58} 
+                  onChange={e => handleChange('label_width', parseInt(e.target.value) || 58)}
                   className="input-field"
                 />
               </div>
@@ -237,8 +237,8 @@ function PrinterConfigCard({ printer, availablePrinters, onSave, onTest, isTesti
                 <label style={{ fontSize: '0.85rem' }}>Balandligi (mm)</label>
                 <input 
                   type="number" 
-                  value={form.label_height || 30} 
-                  onChange={e => handleChange('label_height', parseInt(e.target.value) || 30)}
+                  value={form.label_height || 40} 
+                  onChange={e => handleChange('label_height', parseInt(e.target.value) || 40)}
                   className="input-field"
                 />
               </div>

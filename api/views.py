@@ -17,6 +17,7 @@ from .printer_service import (
     list_system_printers, execute_test_print, print_sale_tickets, print_product_barcode,
     get_barcode_label_b64, get_barcode_label_svg
 )
+from .barcode_utils import generate_unique_ean13
 from .filters import (
     ProductFilter, SaleFilter, CashFlowFilter, DebtFilter, ProductReceiptFilter, ShiftFilter,
     StockTransferFilter, WorkerTransactionFilter, ClientTransactionFilter
@@ -113,6 +114,16 @@ class ProductViewSet(viewsets.ModelViewSet):
             total_quantity=Coalesce(Sum('inventory__quantity'), 0.0, output_field=DecimalField()),
             recent_sales_qty=Coalesce(Subquery(recent_sales), 0.0, output_field=DecimalField())
         ).order_by('-recent_sales_qty', '-id')
+
+    @action(detail=False, methods=['get', 'post'], url_path='generate-barcode')
+    def generate_barcode(self, request):
+        prefix = request.data.get('prefix') if request.method == 'POST' else request.query_params.get('prefix')
+        barcode = generate_unique_ean13(prefix=prefix or '200')
+        return Response({
+            'barcode': barcode,
+            'type': 'EAN13',
+            'length': len(barcode)
+        })
 
 class InventoryViewSet(viewsets.ModelViewSet):
     queryset = Inventory.objects.all().select_related('product', 'product__category').order_by('id')
@@ -287,17 +298,18 @@ class ClientViewSet(viewsets.ModelViewSet):
             return Response({"error": "Usta topilmadi"}, status=status.HTTP_404_NOT_FOUND)
 
         client = Client.objects.filter(worker=worker).first()
-        if not client and worker.phone_number:
-            client = Client.objects.filter(phone_number=worker.phone_number).first()
+        worker_phone = (worker.phone_number or '').strip()
+        if not client and worker_phone:
+            client = Client.objects.filter(phone_number=worker_phone, is_company=False).first()
             if client:
                 client.worker = worker
-                client.save()
+                client.save(update_fields=['worker'])
 
         if not client:
             worker_name = worker.get_full_name() or worker.username
             client = Client.objects.create(
                 name=f"[Usta] {worker_name}",
-                phone_number=worker.phone_number,
+                phone_number=worker_phone,
                 worker=worker,
                 is_company=False
             )
@@ -1380,6 +1392,10 @@ class PrinterSettingViewSet(viewsets.ModelViewSet):
         product_id = request.data.get('product_id')
         quantity = request.data.get('quantity', 1)
         barcode_val = request.data.get('barcode')
+        if hasattr(request.data, 'getlist') and request.data.getlist('artikuls'):
+            artikuls = request.data.getlist('artikuls')
+        else:
+            artikuls = request.data.get('artikuls') or request.data.get('artikul')
         skip_direct = request.data.get('skip_direct', False)
 
         if not product_id:
@@ -1391,8 +1407,8 @@ class PrinterSettingViewSet(viewsets.ModelViewSet):
         except (ValueError, TypeError):
             return Response({"error": "Chop etish soni musbat butun son bo'lishi kerak"}, status=status.HTTP_400_BAD_REQUEST)
 
-        label_b64 = get_barcode_label_b64(product_id, barcode_val=barcode_val)
-        label_svg = get_barcode_label_svg(product_id, barcode_val=barcode_val)
+        label_b64 = get_barcode_label_b64(product_id, barcode_val=barcode_val, artikuls=artikuls)
+        label_svg = get_barcode_label_svg(product_id, barcode_val=barcode_val, artikuls=artikuls)
 
         if skip_direct:
             return Response({
@@ -1402,11 +1418,12 @@ class PrinterSettingViewSet(viewsets.ModelViewSet):
                 "quantity": quantity,
                 "label_image": label_b64,
                 "label_svg": label_svg,
-                "barcode": barcode_val
+                "barcode": barcode_val,
+                "artikuls": artikuls
             })
 
         # Try direct print first
-        ok, msg = print_product_barcode(product_id, quantity, barcode_val=barcode_val)
+        ok, msg = print_product_barcode(product_id, quantity, barcode_val=barcode_val, artikuls=artikuls)
         return Response({
             "detail": msg,
             "success": ok,
@@ -1415,6 +1432,7 @@ class PrinterSettingViewSet(viewsets.ModelViewSet):
             "label_image": label_b64,
             "label_svg": label_svg,
             "barcode": barcode_val,
+            "artikuls": artikuls,
             "can_fallback": not ok
         }, status=status.HTTP_200_OK)
 
@@ -1422,13 +1440,20 @@ class PrinterSettingViewSet(viewsets.ModelViewSet):
     def barcode_preview(self, request):
         product_id = request.data.get('product_id') or request.query_params.get('product_id')
         barcode_val = request.data.get('barcode') or request.query_params.get('barcode')
+        if hasattr(request.data, 'getlist') and request.data.getlist('artikuls'):
+            artikuls = request.data.getlist('artikuls')
+        elif hasattr(request.query_params, 'getlist') and request.query_params.getlist('artikuls'):
+            artikuls = request.query_params.getlist('artikuls')
+        else:
+            artikuls = request.data.get('artikuls') or request.query_params.get('artikuls') or request.data.get('artikul') or request.query_params.get('artikul')
         if not product_id:
             return Response({"error": "product_id talab qilinadi"}, status=status.HTTP_400_BAD_REQUEST)
-        label_b64 = get_barcode_label_b64(int(product_id), barcode_val=barcode_val)
-        label_svg = get_barcode_label_svg(int(product_id), barcode_val=barcode_val)
+        label_b64 = get_barcode_label_b64(int(product_id), barcode_val=barcode_val, artikuls=artikuls)
+        label_svg = get_barcode_label_svg(int(product_id), barcode_val=barcode_val, artikuls=artikuls)
         return Response({
             "product_id": product_id,
             "barcode": barcode_val,
+            "artikuls": artikuls,
             "label_image": label_b64,
             "label_svg": label_svg
         })
@@ -1656,9 +1681,14 @@ def get_worker_open_debts_and_balances(worker):
                 'remaining_amount': float(rem),
             })
 
-    # 3. Spare Parts / Goods Debts (Sale where client.worker == worker or client.phone_number == worker.phone_number)
+    # 3. Spare Parts / Goods Debts (Sale where client.worker == worker or valid client.phone_number == worker.phone_number)
+    client_q = Q(client__worker=worker)
+    worker_phone = (worker.phone_number or '').strip()
+    if worker_phone:
+        client_q |= (Q(client__phone_number=worker_phone) & Q(client__isnull=False) & ~Q(client__phone_number=''))
+
     sales_qs = Sale.objects.filter(
-        Q(client__worker=worker) | Q(client__phone_number=worker.phone_number),
+        client_q,
         debt_amount__gt=0
     ).prefetch_related('items', 'items__product', 'items__product__unit', 'car').order_by('-datetime', '-id')
 
@@ -2109,9 +2139,13 @@ class WorkerTabViewSet(viewsets.ViewSet):
             net_balance_payable_now = paid_earned + total_worker_payments + total_bonuses - total_tool_fees - total_worker_debts - total_payouts
 
             # Goods / Spare parts taken on credit / debt by worker
+            client_q = Q(client__worker=worker)
+            worker_phone = (worker.phone_number or '').strip()
+            if worker_phone:
+                client_q |= (Q(client__phone_number=worker_phone) & Q(client__isnull=False) & ~Q(client__phone_number=''))
+
             worker_goods_sales_all = Sale.objects.filter(
-                Q(client__worker=worker) |
-                Q(client__phone_number=worker.phone_number)
+                client_q
             ).prefetch_related('items').distinct()
             total_goods_taken = worker_goods_sales_all.filter(datetime__gte=start_date, datetime__lte=end_date).aggregate(t=Sum('total_amount'))['t'] or Decimal('0.00')
             total_goods_debt = worker_goods_sales_all.aggregate(d=Sum('debt_amount'))['d'] or Decimal('0.00')
@@ -2305,9 +2339,13 @@ class WorkerTabViewSet(viewsets.ViewSet):
         balances = get_worker_open_debts_and_balances(worker)
 
         # 3. Worker Sales & Debts (Products taken on credit / debt by worker)
+        client_q = Q(client__worker=worker)
+        worker_phone = (worker.phone_number or '').strip()
+        if worker_phone:
+            client_q |= (Q(client__phone_number=worker_phone) & Q(client__isnull=False) & ~Q(client__phone_number=''))
+
         worker_sales_qs = Sale.objects.filter(
-            Q(client__worker=worker) |
-            Q(client__phone_number=worker.phone_number)
+            client_q
         ).prefetch_related('items', 'items__product', 'items__product__unit', 'debts').distinct().order_by('-datetime', '-id')
 
         total_goods_debt_all_time = worker_sales_qs.aggregate(d=Sum('debt_amount'))['d'] or Decimal('0.00')
